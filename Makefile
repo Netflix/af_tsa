@@ -9,7 +9,6 @@ kbuild:
 .PHONY: clean
 clean:
 	make -C $(KDIR) M=`pwd`/src clean
-	rm -r root
 
 .PHONY:
 fmt:
