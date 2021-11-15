@@ -6,9 +6,12 @@ export VERSION
 kbuild:
 	make -C $(KDIR) M=`pwd`/src
 
-.PHONY: clean
-clean:
+.PHONY: kclean
+kclean:
 	make -C $(KDIR) M=`pwd`/src clean
+
+.PHONY: clean
+clean: kclean
 
 .PHONY:
 fmt:
@@ -17,8 +20,9 @@ fmt:
 
 .PHONY: package
 package: tmp/dkms.conf tmp/nfpm.yaml tmp/postInstall.sh tmp/preRemove.sh
+	make -C $(KDIR) M=`pwd`/src clean || true
 	mkdir -p build/
-	nfpm package --packager deb --config tmp/nfpm.yaml --target build/taskintrospection_latest.deb
+	nfpm package --packager deb --config tmp/nfpm.yaml --target build/af_tsa_latest.deb
 
 .PHONY: tmp/postInstall.sh
 tmp/postInstall.sh: tmp
@@ -34,7 +38,7 @@ tmp/preRemove.sh:
 
 .PHONY: tmp/nfpm.yaml
 tmp/nfpm.yaml: nfpm.jsonnet
-	jsonnet --ext-str version=$(VERSION) --ext-str srcdir=/usr/src/taskintrospection-${VERSION} -S nfpm.jsonnet > tmp/nfpm.yaml
+	jsonnet --ext-str version=$(VERSION) --ext-str srcdir=/usr/src/af_tsa-${VERSION} -S nfpm.jsonnet > tmp/nfpm.yaml
 
 .PHONY: tmp/dkms.conf
 tmp/dkms.conf:

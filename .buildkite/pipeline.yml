@@ -1,0 +1,20 @@
+steps:
+  - command: cd hacks && docker build -t af_tsa-build:${BUILDKITE_BUILD_ID} .
+  - wait
+  - command: make package
+    artifact_paths: "build/*.deb"
+    plugins:
+      - docker#v3.9.0:
+          image: af_tsa-build:${BUILDKITE_BUILD_ID}
+  - wait
+  - trigger: titus-upload-debs
+    async: false
+    branches:
+      - main
+    build:
+      env:
+        CALLER_BUILD_ID: "${BUILDKITE_BUILD_ID}"
+        CALLER_JOB_ID: "${BUILDKITE_JOB_ID}"
+        CALLER_UPLOAD_DEB: "build/af_tsa_latest.deb"
+        CALLER_PACKAGE_NAME: "af_tsa"
+        BUILDKITE_CLEAN_CHECKOUT: "true"
