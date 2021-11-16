@@ -11,7 +11,7 @@
 #include <asm/syscall.h>
 #include <linux/tracehook.h>
 
-#include "af_tsa.h"
+#include "include/uapi/af_tsa.h"
 
 MODULE_DESCRIPTION("AF TSA Family");
 MODULE_AUTHOR("Sargun Dhillon <sargun@sargun.me>");
