@@ -5,7 +5,7 @@ add_project_arguments('-Wuninitialized', language: 'c')
 add_global_arguments('-g', language: 'c')
 add_global_arguments('-ggdb3', language: 'c')
 
-incdir = include_directories('../src')
+incdir = include_directories('../src/include/uapi')
 sources = files(
 	'client.c'
 )

@@ -9,7 +9,7 @@
 enum {
 	TSA_C_CREATE,
 	TSA_C_SWAP,
-	__TASKINTROSPECTION_C_MAX,
+	__TSA_C_MAX,
 };
 #define TSA_C_MAX (__TSA_C_MAX - 1)
 
