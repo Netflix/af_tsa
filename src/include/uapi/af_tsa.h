@@ -49,4 +49,7 @@ enum {
 #define TSA_GENL_NAME "af_tsa"
 #define TSA_GENL_VERSION 1
 
+/* Let's start at 10 to avoid stomping on anyone */
+#define SIOCTSASWAP	(SIOCPROTOPRIVATE + 10)
+
 #endif

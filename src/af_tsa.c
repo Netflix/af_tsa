@@ -42,6 +42,8 @@ struct tsa_proto_ops {
 	bool shutdown;
 };
 
+static int __tsa_swap(struct net *net, struct socket *sock);
+
 /*
  * TODO: If the TSA is dying, we should probably do something to stop the call.
  * Maybe return EINTR?
@@ -351,6 +353,22 @@ static ssize_t tsa_splice_read(struct socket *sock, loff_t *ppos,
 	return ret;
 }
 
+static int __tsa_ioctl_swap(struct socket *sock, unsigned int cmd,
+			    unsigned long arg)
+{
+	struct net *net;
+	int ret;
+
+	net = get_net_ns_by_fd(arg);
+	if (IS_ERR(net))
+		return PTR_ERR(net);
+
+	ret = __tsa_swap(net, sock);
+
+	put_net(net);
+	return ret;
+}
+
 static int tsa_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 {
 	const struct proto_ops *fake_ops;
@@ -363,7 +381,13 @@ static int tsa_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 	tops = container_of(fake_ops, struct tsa_proto_ops, real_ops);
 	tsa_worker_start(tops, &worker);
 	realsock = tops->realsock;
-	ret = realsock->ops->ioctl(realsock, cmd, arg);
+	switch (cmd) {
+	case SIOCTSASWAP:
+		ret = __tsa_ioctl_swap(sock, cmd, arg);
+		break;
+	default:
+		ret = realsock->ops->ioctl(realsock, cmd, arg);
+	}
 	tsa_worker_end(tops, &worker);
 	return ret;
 }
