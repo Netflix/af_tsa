@@ -9,7 +9,7 @@
 enum {
 	TSA_C_CREATE,
 	TSA_C_SWAP,
-	__TSA_C_MAX,
+	__TASKINTROSPECTION_C_MAX,
 };
 #define TSA_C_MAX (__TSA_C_MAX - 1)
 
@@ -20,6 +20,7 @@ enum {
 	TSA_C_CREATE_A_TYPE,
 	TSA_C_CREATE_A_PROTOCOL,
 	TSA_C_CREATE_A_FLAGS,
+	TCA_C_CREATE_A_NETNS_FD,
 	__TSA_C_CREATE_A_MAX,
 };
 #define TSA_C_CREATE_A_MAX                                   \
@@ -29,6 +30,7 @@ enum {
 enum {
 	TSA_C_SWAP_A_UNSPEC = 0,
 	TSA_C_SWAP_A_FD,
+	TCA_C_SWAP_A_NETNS_FD,
 	__TSA_C_SWAP_A_MAX,
 };
 #define TSA_C_SWAP_A_MAX                                   \
@@ -44,7 +46,7 @@ enum {
 };
 #define TSA_A_MAX (__TSA_A_MAX - 1)
 
-#define TSA_GENL_NAME "tsa"
+#define TSA_GENL_NAME "af_tsa"
 #define TSA_GENL_VERSION 1
 
 #endif

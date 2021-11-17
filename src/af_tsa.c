@@ -478,8 +478,8 @@ static void __tsa_close_cb(struct work_struct *wq)
 {
 	struct tsa_proto_ops *tops;
 
-	pr_info("TSA Close CB called back\n");
 	tops = container_of(wq, struct tsa_proto_ops, work_close);
+	pr_info("TSA Close CB called back on: %p\n", tops->realsock);
 	sock_release(tops->realsock);
 	module_put(tops->owner);
 	kfree(tops);
@@ -489,8 +489,8 @@ static void __tsa_shutdown_cb(struct work_struct *wq)
 {
 	struct tsa_proto_ops *tops;
 
-	pr_info("TSA shutdown CB called back\n");
 	tops = container_of(wq, struct tsa_proto_ops, work_shutdown);
+	pr_info("TSA shutdown CB called back on: %p\n", tops->realsock);
 	tops->realsock->ops->shutdown(tops->realsock, SHUT_RDWR);
 	spin_lock(&tops->worker_lock);
 	tops->shutdown = true;
@@ -503,8 +503,8 @@ static void tsa_rcu_tasks_cb(struct rcu_head *head)
 {
 	struct tsa_proto_ops *tops;
 
-	pr_info("tsa_rcu_tasks_cb callback called\n");
 	tops = container_of(head, struct tsa_proto_ops, task_rcu_head);
+	pr_info("tsa_rcu_tasks_cb callback called on: %p\n", tops->realsock);
 	spin_lock(&tops->worker_lock);
 	tops->dying = true;
 	spin_unlock(&tops->worker_lock);
@@ -517,6 +517,7 @@ static void start_release_old_tops(const struct proto_ops *ops)
 	struct tsa_proto_ops *tops;
 
 	tops = container_of(ops, struct tsa_proto_ops, real_ops);
+	pr_info("Starting release of: %p\n", tops->realsock);
 	remove_wait_queue(sk_sleep(tops->realsock->sk), &tops->wqe);
 	tops->realsock->file = NULL;
 	tops->realsock->wq.fasync_list = NULL;
@@ -525,6 +526,7 @@ static void start_release_old_tops(const struct proto_ops *ops)
 
 static int tsa_release(struct socket *sock)
 {
+	pr_info("TSA release of top level socket: %p\n", sock);
 	start_release_old_tops(sock->ops);
 
 	return 0;
@@ -572,6 +574,7 @@ static int init_proto_ops(struct tsa_proto_ops *tops, struct socket *newsock)
 	if (!try_module_get(THIS_MODULE))
 		return -EBUSY;
 
+	pr_info("Creating underlying socket: %p\n", newsock);
 	spin_lock_init(&tops->worker_lock);
 	INIT_LIST_HEAD(&tops->workers);
 	tops->dying = false;
@@ -655,7 +658,6 @@ static int tsa_make_socket(struct socket *sock, struct socket *underlyingsock)
 	}
 
 	WRITE_ONCE(sock->sk, underlyingsock->sk);
-	smp_wmb();
 	WRITE_ONCE(sock->ops, &tops->real_ops);
 	underlyingsock->file = sock->file;
 	smp_wmb();
@@ -767,14 +769,11 @@ static void copy_sockopts(struct sock *oldsk, struct sock *newsk)
 	newsk->sk_pacing_rate = oldsk->sk_pacing_rate;
 }
 
-static int __tsa_swap(struct socket *sock)
+static int __tsa_swap(struct net *net, struct socket *sock)
 {
 	int ret, domain, type, protocol;
 	struct socket *newsock;
 	struct sock *oldsk;
-
-	if (sock->ops->release != tsa_release)
-		return -EINVAL;
 
 	oldsk = sock->sk;
 	lock_sock(oldsk);
@@ -783,8 +782,7 @@ static int __tsa_swap(struct socket *sock)
 	protocol = oldsk->sk_protocol;
 	release_sock(oldsk);
 
-	ret = __sock_create(current->nsproxy->net_ns, domain, type, protocol,
-			    &newsock, 0);
+	ret = __sock_create(net, domain, type, protocol, &newsock, 0);
 	if (ret)
 		return ret;
 
@@ -803,26 +801,52 @@ static int __tsa_swap(struct socket *sock)
 
 static int tsa_swap(struct sk_buff *skb, struct genl_info *info)
 {
+	struct nlattr *afd, *anetnsfd;
+	struct net *net = NULL;
 	struct socket *sock;
-	struct nlattr *afd;
-	int err = 0, fd;
+	int err, fd;
 
 	afd = info->attrs[TSA_C_SWAP_A_FD];
 	if (!afd) {
-		NL_SET_ERR_MSG_MOD(info->extack, "Missing domain");
+		NL_SET_ERR_MSG_MOD(info->extack, "Missing FD to swap");
 		return -EINVAL;
 	}
+
+	anetnsfd = info->attrs[TCA_C_SWAP_A_NETNS_FD];
+
 	fd = nla_get_u32(afd);
 	sock = sockfd_lookup(fd, &err);
-	if (err)
+	if (!sock) {
+		NL_SET_ERR_MSG_MOD(info->extack,
+				   "Could not perform sockfd_lookup");
 		return err;
+	}
+
+	if (sock->ops->release != tsa_release) {
+		err = -EINVAL;
+		NL_SET_ERR_MSG_MOD(
+			info->extack,
+			"Tried to swap FD that was not created by AF_TSA");
+		pr_warn_ratelimited(
+			"af_tsa: Tried to swap FD that was not created by AF_TSA\n");
+		goto out;
+	}
+
+	if (anetnsfd) {
+		net = get_net_ns_by_fd(nla_get_u32(anetnsfd));
+		if (IS_ERR(net)) {
+			err = PTR_ERR(net);
+			goto out;
+		}
+	} else {
+		net = get_net(current->nsproxy->net_ns);
+	}
 
 	err = mutex_lock_killable(&tsa_mutex);
-	if (err)
-		goto out;
-	err = __tsa_swap(sock);
+	err = __tsa_swap(net, sock);
 	mutex_unlock(&tsa_mutex);
 
+	put_net(net);
 out:
 	sockfd_put(sock);
 	return err;
@@ -853,9 +877,10 @@ static int tsa_create(struct sk_buff *skb, struct genl_info *info)
 {
 	/* message handling code goes here; return 0 on success, negative
 	* values on failure */
-	struct nlattr *adomain, *atype, *aprotocol, *aflags;
+	struct nlattr *adomain, *atype, *aprotocol, *aflags, *anetnsfd;
 	struct socket *sock, *underlyingsock;
 	int domain, type, protocol, flags;
+	struct net *net = NULL;
 	struct sk_buff *reply;
 	struct file *newfile;
 	int err, fd;
@@ -874,6 +899,7 @@ static int tsa_create(struct sk_buff *skb, struct genl_info *info)
 
 	aprotocol = info->attrs[TSA_C_CREATE_A_PROTOCOL];
 	aflags = info->attrs[TSA_C_CREATE_A_FLAGS];
+	anetnsfd = info->attrs[TCA_C_CREATE_A_NETNS_FD];
 
 	domain = nla_get_u32(adomain);
 	type = nla_get_u32(atype);
@@ -886,12 +912,21 @@ static int tsa_create(struct sk_buff *skb, struct genl_info *info)
 	if (type != SOCK_STREAM && type != SOCK_DGRAM)
 		return -ESOCKTNOSUPPORT;
 
-	err = __sock_create(current->nsproxy->net_ns, domain, type, protocol,
-			    &underlyingsock, 0);
+	if (anetnsfd) {
+		net = get_net_ns_by_fd(nla_get_u32(anetnsfd));
+		if (IS_ERR(net)) {
+			NL_SET_ERR_MSG_MOD(info->extack, "could not get netns");
+			return PTR_ERR(net);
+		}
+	} else {
+		net = get_net(current->nsproxy->net_ns);
+	}
+
+	err = __sock_create(net, domain, type, protocol, &underlyingsock, 0);
 	if (err) {
 		NL_SET_ERR_MSG_MOD(info->extack,
 				   "could not create underlying socket");
-		return err;
+		goto out_put_net;
 	}
 
 	reply = nlmsg_new(NLMSG_DEFAULT_SIZE, GFP_KERNEL);
@@ -924,6 +959,7 @@ static int tsa_create(struct sk_buff *skb, struct genl_info *info)
 		err = -ENFILE;
 		goto out_put_module;
 	}
+	pr_info("TSA creation of top level socket: %p\n", sock);
 
 	sock->type = type;
 
@@ -960,7 +996,8 @@ static int tsa_create(struct sk_buff *skb, struct genl_info *info)
 	err = tsa_create_reply(fd, reply, info);
 	if (!err) {
 		fd_install(fd, newfile);
-		return 0;
+		err = 0;
+		goto out_put_net;
 	}
 
 	put_unused_fd(fd);
@@ -977,6 +1014,8 @@ out_put_msg:
 	nlmsg_free(reply);
 out_put_sock:
 	sock_release(underlyingsock);
+out_put_net:
+	put_net(net);
 	return err;
 }
 
@@ -985,10 +1024,12 @@ static struct nla_policy tsa_create_policy[TSA_C_CREATE_A_MAX + 1] = {
 	[TSA_C_CREATE_A_TYPE] = { .type = NLA_U32, },
 	[TSA_C_CREATE_A_PROTOCOL] = { .type = NLA_U32, },
 	[TSA_C_CREATE_A_FLAGS] = { .type = NLA_U32, },
+	[TCA_C_CREATE_A_NETNS_FD] = { .type = NLA_U32, },
 };
 
 static struct nla_policy tsa_swap_policy[TSA_C_SWAP_A_MAX + 1] = {
 	[TSA_C_SWAP_A_FD] = { .type = NLA_U32, },
+	[TCA_C_SWAP_A_NETNS_FD] = { .type = NLA_U32, },
 };
 
 static const struct genl_ops genl_ops[] = {
