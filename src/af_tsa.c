@@ -655,6 +655,7 @@ static int tsa_make_socket(struct socket *sock, struct socket *underlyingsock)
 	}
 
 	WRITE_ONCE(sock->sk, underlyingsock->sk);
+	smp_wmb();
 	WRITE_ONCE(sock->ops, &tops->real_ops);
 	underlyingsock->file = sock->file;
 	smp_wmb();
