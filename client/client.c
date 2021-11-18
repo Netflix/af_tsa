@@ -1,4 +1,6 @@
 #define _GNU_SOURCE
+#include <sys/ioctl.h>
+#include <linux/socket.h>
 #include <libmnl/libmnl.h>
 #include <linux/genetlink.h>
 #include <time.h>
@@ -15,6 +17,7 @@
 #include <stdlib.h>
 #include <sys/prctl.h>
 #include <signal.h>
+
 
 #include "af_tsa.h"
 
@@ -62,6 +65,13 @@ static int create_data_cb(const struct nlmsghdr *nlh, void *data)
 	return MNL_CB_OK;
 }
 
+static bool fasync_callback = false;
+
+void poll_handler(int signum) {
+	fasync_callback = true;
+	printf("Got poll callback\n");
+}
+
 int main()
 {
 	struct sockaddr_in servaddr = {
@@ -79,9 +89,11 @@ int main()
 		.sin_port = htons(0),
 		.sin_family = AF_INET,
 	};
+	int flags, ret, seq, portid, one = 1, newfd = -1;
 	char *hello = "Hello, how you doin\n";
 	char buf[MNL_SOCKET_BUFFER_SIZE];
-	int ret, seq, portid, one = 1, newfd = -1;
+	struct sigaction new_action = {};
+	struct pollfd pollfds[] = {};
 	struct genlmsghdr *genl;
 	struct mnl_socket *nl;
 	struct nlmsghdr *nlh;
@@ -163,6 +175,14 @@ int main()
 	assert(getsockname(newfd, &localaddr, &addrlen) == 0);
 	printf("Listening on port: %d\n", ntohs(localaddr.sin_port));
 
+	sigemptyset(&new_action.sa_mask);
+	new_action.sa_handler = poll_handler;
+	sigaction(SIGPOLL, &new_action, NULL);
+
+	fcntl(newfd, F_SETOWN, getpid());
+	flags = fcntl(newfd, F_GETFL);
+	fcntl(newfd, F_SETFL, flags | FASYNC);
+
 	if (fork() == 0) {
 		struct sockaddr_in newlocaladdr = {};
 		int originalnetns, newnetns;
@@ -188,6 +208,9 @@ int main()
 
 		mnl_attr_put_u32(nlh, TSA_C_SWAP_A_FD, newfd);
 		mnl_attr_put_u32(nlh, TCA_C_SWAP_A_NETNS_FD, newnetns);
+		/* Wait for the poll in the other process to start */
+		sleep(1);
+		/*
 		ret = mnl_socket_sendto(nl, nlh, nlh->nlmsg_len);
 		if (ret < 0) {
 			perror("mnl_socket_sendto");
@@ -202,6 +225,8 @@ int main()
 				break;
 			ret = mnl_socket_recvfrom(nl, buf, sizeof(buf));
 		}
+		*/
+		ret = ioctl(newfd, SIOCTSASWAP, newnetns);
 		printf("Completed swap: %d\n", ret);
 		assert(ret == 0);
 		assert(sendto(newfd, hello, strlen(hello), MSG_CONFIRM,
@@ -218,9 +243,27 @@ int main()
 		_exit(0);
 	}
 
-	ret = recv(newfd, &hello, sizeof(hello), 0);
-	printf("Receive ret: %d\n", ret);
-	assert(ret > 0);
+	pollfds[0].fd = newfd;
+	pollfds[0].events = POLLIN;
+	/* Make sure there's not any standing poll events */
+	assert(poll(pollfds, 1, 0) == 0);
+	if (fork() == 0) {
+
+		assert(prctl(PR_SET_PDEATHSIG, SIGKILL) == 0);
+		ret = recv(newfd, &hello, sizeof(hello), 0);
+		printf("Receive ret: %d\n", ret);
+		assert(ret > 0);
+		_exit(0);
+	}
+	assert(poll(pollfds, 1, 10000) == 1);
+	assert(pollfds[0].revents & POLLIN);
+
+	/* TODO: Add testing that we actually read / received data */
+	do {
+		poll(pollfds, 1, 0);
+	} while(pollfds[0].revents & POLLIN);
+	assert(fasync_callback);
+
 	printf("Close: %d\n", close(newfd));
 
 	return 0;

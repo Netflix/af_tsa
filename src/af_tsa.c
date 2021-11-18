@@ -32,7 +32,6 @@ struct tsa_proto_ops {
 	struct socket *tsasock;
 	struct module *owner;
 	struct rcu_head task_rcu_head;
-	struct wait_queue_entry wqe;
 	struct work_struct work_close;
 	struct work_struct work_shutdown;
 
@@ -359,6 +358,7 @@ static int __tsa_ioctl_swap(struct socket *sock, unsigned int cmd,
 	struct net *net;
 	int ret;
 
+	pr_info("Performing ioctl based swap on to ns %ld\n", arg);
 	net = get_net_ns_by_fd(arg);
 	if (IS_ERR(net))
 		return PTR_ERR(net);
@@ -536,15 +536,18 @@ static void tsa_rcu_tasks_cb(struct rcu_head *head)
 	schedule_work(&tops->work_shutdown);
 }
 
+/* This function may block */
 static void start_release_old_tops(const struct proto_ops *ops)
 {
 	struct tsa_proto_ops *tops;
 
 	tops = container_of(ops, struct tsa_proto_ops, real_ops);
 	pr_info("Starting release of: %p\n", tops->realsock);
-	remove_wait_queue(sk_sleep(tops->realsock->sk), &tops->wqe);
 	tops->realsock->file = NULL;
-	tops->realsock->wq.fasync_list = NULL;
+	write_lock_bh(&tops->realsock->sk->sk_callback_lock);
+	tops->realsock->sk->sk_wq = &tops->realsock->wq;
+	write_unlock_bh(&tops->realsock->sk->sk_callback_lock);
+
 	call_rcu_tasks(&tops->task_rcu_head, tsa_rcu_tasks_cb);
 }
 
@@ -552,40 +555,6 @@ static int tsa_release(struct socket *sock)
 {
 	pr_info("TSA release of top level socket: %p\n", sock);
 	start_release_old_tops(sock->ops);
-
-	return 0;
-}
-
-static int wq_cb(struct wait_queue_entry *wq_entry, unsigned mode, int flags,
-		 void *key)
-{
-	struct tsa_proto_ops *tops;
-	struct socket_wq *wq;
-	__poll_t p;
-
-	p = key_to_poll(key);
-	tops = container_of(wq_entry, struct tsa_proto_ops, wqe);
-
-	rcu_read_lock();
-	wq = &tops->tsasock->wq;
-
-	/* This only works because of a terrible hack since poll is always called before doing an fasync based notification */
-	lock_sock(tops->tsasock->sk);
-	tops->realsock->wq.fasync_list = tops->tsasock->wq.fasync_list;
-	release_sock(tops->tsasock->sk);
-
-	if (!skwq_has_sleeper(wq))
-		goto out;
-
-	if (!key)
-		wake_up_interruptible_all(&wq->wait);
-	else if (p & EPOLLERR)
-		wake_up_interruptible_poll(&wq->wait, p);
-	else
-		wake_up_interruptible_sync_poll(&wq->wait, p);
-
-out:
-	rcu_read_unlock();
 
 	return 0;
 }
@@ -650,10 +619,8 @@ static int init_proto_ops(struct tsa_proto_ops *tops, struct socket *newsock)
 
 	tops->realsock = newsock;
 	init_rcu_head(&tops->task_rcu_head);
-	init_waitqueue_func_entry(&tops->wqe, wq_cb);
 	INIT_WORK(&tops->work_close, __tsa_close_cb);
 	INIT_WORK(&tops->work_shutdown, __tsa_shutdown_cb);
-	add_wait_queue(sk_sleep(newsock->sk), &tops->wqe);
 
 	return 0;
 }
@@ -681,9 +648,14 @@ static int tsa_make_socket(struct socket *sock, struct socket *underlyingsock)
 		return ret;
 	}
 
+	write_lock_bh(&underlyingsock->sk->sk_callback_lock);
+	underlyingsock->sk->sk_wq = &sock->wq;
+	write_unlock_bh(&underlyingsock->sk->sk_callback_lock);
+
 	WRITE_ONCE(sock->sk, underlyingsock->sk);
+	smp_wmb();
 	WRITE_ONCE(sock->ops, &tops->real_ops);
-	underlyingsock->file = sock->file;
+	WRITE_ONCE(underlyingsock->file, sock->file);
 	smp_wmb();
 	/* Synchronization:
 	1. First do tasks RCU, that way we know that all tasks are at a "safepoint"
@@ -721,6 +693,7 @@ const static enum sock_flags copied_bits[] = {
 	 */
 	SOCK_TIMESTAMP,
 	SOCK_TIMESTAMPING_RX_SOFTWARE,
+	SOCK_FASYNC,
 };
 
 static void copy_sockopts(struct sock *oldsk, struct sock *newsk)
