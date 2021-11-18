@@ -183,6 +183,11 @@ static int tsa_accept(struct socket *sock, struct socket *newsock, int flags,
 	tops = container_of(fake_ops, struct tsa_proto_ops, real_ops);
 	tsa_worker_start(tops, &worker);
 	realsock = tops->realsock;
+	module_put(newsock->ops->owner);
+	newsock->ops = realsock->ops;
+	__module_get(realsock->ops->owner);
+	newsock->ops = realsock->ops;
+	pr_warn("Running accept, newsock's file: %p\n", newsock->file);
 	ret = realsock->ops->accept(realsock, newsock, flags, kern);
 	if (tsa_worker_end(tops, &worker))
 		return restart_syscall();
@@ -543,6 +548,8 @@ static void start_release_old_tops(const struct proto_ops *ops)
 
 	tops = container_of(ops, struct tsa_proto_ops, real_ops);
 	pr_info("Starting release of: %p\n", tops->realsock);
+	WARN_ON(!tops->realsock);
+	WARN_ON(!tops->realsock->file);
 	tops->realsock->file = NULL;
 	write_lock_bh(&tops->realsock->sk->sk_callback_lock);
 	tops->realsock->sk->sk_wq = &tops->realsock->wq;
@@ -642,6 +649,7 @@ static int tsa_make_socket(struct socket *sock, struct socket *underlyingsock)
 		return -ENOMEM;
 
 	tops->tsasock = sock;
+	underlyingsock->file = sock->file;
 	ret = init_proto_ops(tops, underlyingsock);
 	if (ret) {
 		kfree(tops);
@@ -655,7 +663,6 @@ static int tsa_make_socket(struct socket *sock, struct socket *underlyingsock)
 	WRITE_ONCE(sock->sk, underlyingsock->sk);
 	smp_wmb();
 	WRITE_ONCE(sock->ops, &tops->real_ops);
-	WRITE_ONCE(underlyingsock->file, sock->file);
 	smp_wmb();
 	/* Synchronization:
 	1. First do tasks RCU, that way we know that all tasks are at a "safepoint"
@@ -962,10 +969,16 @@ static int tsa_create(struct sk_buff *skb, struct genl_info *info)
 
 	WARN_ON(!sock);
 	WARN_ON(!underlyingsock);
+	newfile = sock_alloc_file(sock, flags, NULL);
+	if (IS_ERR(newfile)) {
+		NL_SET_ERR_MSG_MOD(info->extack, "sock_alloc_file failed");
+		goto out_put_tsa_socket;
+	}
+
 	err = tsa_make_socket(sock, underlyingsock);
 	if (err) {
 		NL_SET_ERR_MSG_MOD(info->extack, "Could not create socket");
-		goto out_put_tsa_socket;
+		goto out_put_file;
 	}
 
 	/* TODO: Figure this out
@@ -976,12 +989,6 @@ static int tsa_create(struct sk_buff *skb, struct genl_info *info)
 		goto out_put_socket;
 	}
 	*/
-
-	newfile = sock_alloc_file(sock, flags, NULL);
-	if (IS_ERR(newfile)) {
-		NL_SET_ERR_MSG_MOD(info->extack, "sock_alloc_file failed");
-		goto out_put_tsa_socket;
-	}
 
 	fd = get_unused_fd_flags(flags);
 	if (fd < 0) {
@@ -1001,10 +1008,8 @@ static int tsa_create(struct sk_buff *skb, struct genl_info *info)
 
 out_put_file:
 	fput(newfile);
-
 out_put_tsa_socket:
 	sock_release(sock);
-
 out_put_module:
 	module_put(THIS_MODULE);
 out_put_msg:
