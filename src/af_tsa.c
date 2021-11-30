@@ -10,6 +10,7 @@
 #include <linux/sched/task_stack.h>
 #include <asm/syscall.h>
 #include <linux/tracehook.h>
+#include <linux/version.h>
 
 #include "include/uapi/af_tsa.h"
 
@@ -764,10 +765,14 @@ static void copy_sockopts(struct sock *oldsk, struct sock *newsk)
 			newsk, READ_ONCE(oldsk->sk_peek_off));
 
 	WRITE_ONCE(newsk->sk_ll_usec, READ_ONCE(oldsk->sk_ll_usec));
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,11,0)
 	WRITE_ONCE(newsk->sk_prefer_busy_poll,
-		   READ_ONCE(oldsk->sk_prefer_busy_poll));
+		READ_ONCE(oldsk->sk_prefer_busy_poll));
 	WRITE_ONCE(newsk->sk_busy_poll_budget,
-		   READ_ONCE(oldsk->sk_busy_poll_budget));
+		READ_ONCE(oldsk->sk_busy_poll_budget));
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5,12,0)
+#error "Untested kernel version"
+#endif
 	newsk->sk_pacing_status = oldsk->sk_pacing_status;
 	newsk->sk_max_pacing_rate = oldsk->sk_max_pacing_rate;
 	newsk->sk_pacing_rate = oldsk->sk_pacing_rate;
