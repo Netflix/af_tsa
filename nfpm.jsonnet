@@ -1,7 +1,7 @@
 local srcdir = std.rstripChars(std.extVar('srcdir'), '/') + '/';
 
 std.manifestYamlDoc({
-  name: 'af_tsa',
+  name: 'aftsa',
   arch: 'amd64',
   platform: 'linux',
   version: std.extVar('version'),
