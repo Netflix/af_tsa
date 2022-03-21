@@ -364,7 +364,7 @@ static int __tsa_ioctl_swap(struct socket *sock, unsigned int cmd,
 	struct net *net;
 	int ret;
 
-	pr_info("Performing ioctl based swap on to ns %ld\n", arg);
+	pr_debug("Performing ioctl based swap on to ns %ld\n", arg);
 	net = get_net_ns_by_fd(arg);
 	if (IS_ERR(net))
 		return PTR_ERR(net);
@@ -509,7 +509,7 @@ static void __tsa_close_cb(struct work_struct *wq)
 	struct tsa_proto_ops *tops;
 
 	tops = container_of(wq, struct tsa_proto_ops, work_close);
-	pr_info("TSA Close CB called back on: %p\n", tops->realsock);
+	pr_debug("TSA Close CB called back on: %p\n", tops->realsock);
 	sock_release(tops->realsock);
 	module_put(tops->owner);
 	kfree(tops);
@@ -520,7 +520,7 @@ static void __tsa_shutdown_cb(struct work_struct *wq)
 	struct tsa_proto_ops *tops;
 
 	tops = container_of(wq, struct tsa_proto_ops, work_shutdown);
-	pr_info("TSA shutdown CB called back on: %p\n", tops->realsock);
+	pr_debug("TSA shutdown CB called back on: %p\n", tops->realsock);
 	tops->realsock->ops->shutdown(tops->realsock, SHUT_RDWR);
 	spin_lock(&tops->worker_lock);
 	tops->shutdown = true;
@@ -534,7 +534,7 @@ static void tsa_rcu_tasks_cb(struct rcu_head *head)
 	struct tsa_proto_ops *tops;
 
 	tops = container_of(head, struct tsa_proto_ops, task_rcu_head);
-	pr_info("tsa_rcu_tasks_cb callback called on: %p\n", tops->realsock);
+	pr_debug("tsa_rcu_tasks_cb callback called on: %p\n", tops->realsock);
 	spin_lock(&tops->worker_lock);
 	tops->dying = true;
 	spin_unlock(&tops->worker_lock);
@@ -548,7 +548,7 @@ static void start_release_old_tops(const struct proto_ops *ops)
 	struct tsa_proto_ops *tops;
 
 	tops = container_of(ops, struct tsa_proto_ops, real_ops);
-	pr_info("Starting release of: %p\n", tops->realsock);
+	pr_debug("Starting release of: %p\n", tops->realsock);
 	WARN_ON(!tops->realsock);
 	WARN_ON(!tops->realsock->file);
 	tops->realsock->file = NULL;
@@ -561,7 +561,7 @@ static void start_release_old_tops(const struct proto_ops *ops)
 
 static int tsa_release(struct socket *sock)
 {
-	pr_info("TSA release of top level socket: %p\n", sock);
+	pr_debug("TSA release of top level socket: %p\n", sock);
 	start_release_old_tops(sock->ops);
 
 	return 0;
@@ -575,7 +575,7 @@ static int init_proto_ops(struct tsa_proto_ops *tops, struct socket *newsock)
 	if (!try_module_get(THIS_MODULE))
 		return -EBUSY;
 
-	pr_info("Creating underlying socket: %p\n", newsock);
+	pr_debug("Creating underlying socket: %p\n", newsock);
 	spin_lock_init(&tops->worker_lock);
 	INIT_LIST_HEAD(&tops->workers);
 	tops->dying = false;
@@ -968,7 +968,7 @@ static int tsa_create(struct sk_buff *skb, struct genl_info *info)
 		err = -ENFILE;
 		goto out_put_module;
 	}
-	pr_info("TSA creation of top level socket: %p\n", sock);
+	pr_debug("TSA creation of top level socket: %p\n", sock);
 
 	sock->type = type;
 
