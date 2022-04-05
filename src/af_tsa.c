@@ -188,7 +188,7 @@ static int tsa_accept(struct socket *sock, struct socket *newsock, int flags,
 	newsock->ops = realsock->ops;
 	__module_get(realsock->ops->owner);
 	newsock->ops = realsock->ops;
-	pr_warn("Running accept, newsock's file: %p\n", newsock->file);
+	pr_debug("Running accept, newsock's file: %p\n", newsock->file);
 	ret = realsock->ops->accept(realsock, newsock, flags, kern);
 	if (tsa_worker_end(tops, &worker))
 		return restart_syscall();
