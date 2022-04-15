@@ -852,9 +852,12 @@ static int tsa_swap(struct sk_buff *skb, struct genl_info *info)
 	}
 
 	err = mutex_lock_killable(&tsa_mutex);
+	if (err)
+		goto out_put_net;
 	err = __tsa_swap(net, sock);
 	mutex_unlock(&tsa_mutex);
 
+out_put_net:
 	put_net(net);
 out:
 	sockfd_put(sock);
