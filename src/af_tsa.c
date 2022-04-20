@@ -19,121 +19,162 @@ MODULE_AUTHOR("Sargun Dhillon <sargun@sargun.me>");
 MODULE_LICENSE("Dual BSD/GPL");
 MODULE_ALIAS_NET_PF_PROTO_NAME(PF_NETLINK, NETLINK_GENERIC, TSA_GENL_NAME);
 
-DEFINE_SEQLOCK(tsa_seqlock);
-DEFINE_MUTEX(tsa_mutex);
+/*
+ * Brain dump:
+ *                                                                                                                                         
+ *                                                                                                                                        
+ *                                                                                                                                        
+ * |----------------------------------------------------------------------------------------------------------------+                     
+ * |         tsa socket               tsa_proto_ops_wrapper            tsa_realsock             "real" socket       |"real" sk            
+ * |      +---------------+            +-----------------+          +-----------------+          +---------+        |---------------+     
+ * |      |               |            |                 |          |                 |          |         |        |               |     
+ * |      |  proto_ops------------------   tsa_realsock--------------     realsock----------------  sk--------------- sk_destruct   |     
+ * +------------sk        |            |                 |          |                 |          |         |        |               |     
+ * +--------               |            |                 |          |     tsasock     +---+      |         |        | sk_user_data  |     
+ * |       |               |            |                 |          |        |        |   |      |         |        |      |        |     
+ * |       |               |            |                 |          |        |        |   |      |         |        |      |        |     
+ * |       +---------------+            +-----------------+          +--------|--------+   |      +---------+        +------|--------+     
+ * |    Lifetime: Userspace Socket        Lifetime: TSA Sock's       Lifetime: Real socket |                                |              
+ * |                                                                          |            |                                |              
+ * |                                                                          |            |                                |              
+ * |                                                                          |            |                                |              
+ * |--------------------------------------------------------------------------+            +---------------------------------              
+ */
+
+/*
+ * TODO:
+ *
+ * - Clear sock_nospace flag on socket
+ */
+static DEFINE_SEQLOCK(tsa_seqlock);
+static DEFINE_MUTEX(tsa_mutex);
 static struct genl_family genl_family;
 
+struct tsa_worker {
+	int srcu_idx;
+};
 
-struct tsa_proto_ops {
-	struct proto_ops real_ops;
+struct tsa_realsock {
+	/* Pointer back to the TSA sock that built this real sock */
 	struct socket *realsock;
 	struct socket *tsasock;
-	struct module *owner;
-	struct rcu_head task_rcu_head;
-	struct work_struct work_close;
-	struct work_struct work_shutdown;
 
 	void (*save_state_change)(struct sock *sk);
 	void (*save_data_ready)(struct sock *sk);
 	void (*save_write_space)(struct sock *sk);
 	void (*save_error_report)(struct sock *sk);
-	void (*save_destroy)(struct sock *sk);
+	void (*save_destruct)(struct sock *sk);
 
-	struct kref refcnt;
+	/* Is this socket shutting down? */
+	bool shutting_down;
 
+	/*
+	1. SRCU Wait
+	2. Close
+	*/
+	struct rcu_head srcu_head;
+	struct work_struct work_release;
+
+	struct srcu_struct *tsa_proto_ops_wrapper_srcu;
+};
+
+struct tsa_proto_ops_wrapper {
+	struct proto_ops real_ops;
+	struct tsa_realsock *tsa_realsock;
+	struct srcu_struct srcu;
+
+	struct work_struct work_free;
+	struct rcu_head srcu_head;
 };
 
 static int __tsa_swap(struct net *net, struct socket *sock);
+static int tsa_release(struct socket *sock);
 
-/*
- * TODO: If the TSA is dying, we should probably do something to stop the call.
- * Maybe return EINTR?
- */
-static void __tsa_worker_start(struct tsa_proto_ops *tops,
-			       struct tsa_worker *worker)
+struct tsa_proto_ops_wrapper* sock_tpow(struct socket *sock)
 {
-	WARN_ON(tops->dying);
-	worker->task = current;
-	WARN_ON(!kref_get_unless_zero(&tops->refcnt);
+	const struct proto_ops *po = sock->ops;
+	struct tsa_proto_ops_wrapper *tpow;
+
+	WARN_ON(po->release != tsa_release);
+	tpow = container_of(po, struct tsa_proto_ops_wrapper, real_ops);
+	return tpow;
 }
 
-static struct tsa_proto_ops* tsa_worker_start(struct socket *sock,
-			     		      struct tsa_worker *worker)
+static struct tsa_realsock* tsa_worker_start(struct socket *sock,
+			     		     struct tsa_worker *worker)
 {
-	const struct proto_ops *fake_ops;
-	struct tsa_proto_ops *tops;
+	struct tsa_proto_ops_wrapper *tpow;
+	struct tsa_realsock *tsa_realsock;
 	unsigned seq;
 
 retry:
 	seq = read_seqbegin(&tsa_seqlock);
-	fake_ops = sock->ops;
-	tops = container_of(fake_ops, struct tsa_proto_ops, real_ops);
-	spin_lock(&tops->worker_lock);
+	tpow = sock_tpow(sock);
+	tsa_realsock = tpow->tsa_realsock;
 
 	if (read_seqretry(&tsa_seqlock, seq)) {
-		spin_unlock(&tops->worker_lock);
 		goto retry;
 	}
 
-	__tsa_worker_start(tops, worker);
+	WARN_ON(tsa_realsock->shutting_down);
+	worker->srcu_idx = srcu_read_lock(&tpow->srcu);
 
-	return tops;
+	return tsa_realsock;
 }
 
-static struct tsa_proto_ops* tsa_worker_start_sk(struct sock *sk,
-						 struct tsa_worker *worker)
+static struct tsa_realsock* tsa_worker_start_sk(struct sock *sk,
+						struct tsa_worker *worker)
 {
 	return tsa_worker_start(sk->sk_socket, worker);
 }
 
-static bool tsa_worker_end(struct tsa_proto_ops *tops,
+static bool tsa_worker_end(struct tsa_realsock *realsock,
 			   struct tsa_worker *worker)
 {
-	bool dying;
+	struct tsa_proto_ops_wrapper *tpow;
+	bool shutting_down;
 
-	dying = tops->dying;
-	if (dying && tops->shutdown && list_empty(&tops->workers))
-		schedule_work(&tops->work_close);
+	tpow = sock_tpow(realsock->tsasock);
+	smp_rmb();
+	shutting_down = realsock->shutting_down;
+	srcu_read_unlock(&tpow->srcu, worker->srcu_idx);
 
-	return dying;
+	return shutting_down;
 }
 
 static int tsa_setsockopt(struct socket *sock, int level, int optname,
 			  sockptr_t optval, unsigned int optlen)
 {
-	struct tsa_proto_ops *tops;
+	struct tsa_realsock *trealsock;
 	struct tsa_worker worker;
-	struct socket *realsock;
 	int ret;
 
-	tops = tsa_worker_start(sock, &worker);
-	realsock = tops->realsock;
-	ret = realsock->ops->setsockopt(realsock, level, optname, optval,
-					optlen);
-	tsa_worker_end(tops, &worker);
+	trealsock = tsa_worker_start(sock, &worker);
+	ret = trealsock->realsock->ops->setsockopt(trealsock->realsock, level, optname, optval, optlen);
+	tsa_worker_end(trealsock, &worker);
+
 	return ret;
 }
 
 static int tsa_getsockopt(struct socket *sock, int level, int optname,
 			  char __user *optval, int __user *optlen)
 {
-	struct tsa_proto_ops *tops;
+	struct tsa_realsock *trealsock;
 	struct tsa_worker worker;
 	struct socket *realsock;
 	int ret;
 
-	tops = tsa_worker_start(sock, &worker);
-	realsock = tops->realsock;
-	ret = realsock->ops->getsockopt(realsock, level, optname, optval,
-					optlen);
-	tsa_worker_end(tops, &worker);
+	trealsock = tsa_worker_start(sock, &worker);
+	realsock = trealsock->realsock;
+	ret = realsock->ops->getsockopt(trealsock->realsock, level, optname, optval, optlen);
+	tsa_worker_end(trealsock, &worker);
 	return ret;
 }
 
 static __poll_t tsa_poll(struct file *file, struct socket *sock, poll_table *p)
 {
 	/* TODO: Make it so when we swap out the sockets, we can properly *re-wake* out of this function */
-	struct tsa_proto_ops *tops;
+	struct tsa_realsock *trealsock;
 	struct tsa_worker worker;
 	struct socket *realsock;
 	__poll_t ret = 0;
@@ -141,41 +182,40 @@ static __poll_t tsa_poll(struct file *file, struct socket *sock, poll_table *p)
 	sock_poll_wait(file, sock, p);
 
 	/* Wait to dereference the operations. There's a write memory barrier elsewhere to protect this. */
-	tops = tsa_worker_start(sock, &worker);
-
-	realsock = tops->realsock;
-	ret = realsock->ops->poll(file, realsock, p);
-	tsa_worker_end(tops, &worker);
+	trealsock = tsa_worker_start(sock, &worker);
+	realsock = trealsock->realsock;
+	ret = realsock->ops->poll(file, trealsock->realsock, p);
+	tsa_worker_end(trealsock, &worker);
 	return ret;
 }
 
 static int tsa_bind(struct socket *sock, struct sockaddr *myaddr,
 		    int sockaddr_len)
 {
-	struct tsa_proto_ops *tops;
+	struct tsa_realsock *trealsock;
 	struct tsa_worker worker;
 	struct socket *realsock;
 	int ret;
 
-	tops = tsa_worker_start(sock, &worker);
-	realsock = tops->realsock;
+	trealsock = tsa_worker_start(sock, &worker);
+	realsock = trealsock->realsock;
 	ret = realsock->ops->bind(realsock, myaddr, sockaddr_len);
-	tsa_worker_end(tops, &worker);
+	tsa_worker_end(trealsock, &worker);
 	return ret;
 }
 
 static int tsa_connect(struct socket *sock, struct sockaddr *vaddr,
 		       int sockaddr_len, int flags)
 {
-	struct tsa_proto_ops *tops;
+	struct tsa_realsock *trealsock;
 	struct tsa_worker worker;
 	struct socket *realsock;
 	int ret;
 
-	tops = tsa_worker_start(sock, &worker);
-	realsock = tops->realsock;
+	trealsock = tsa_worker_start(sock, &worker);
+	realsock = trealsock->realsock;
 	ret = realsock->ops->connect(realsock, vaddr, sockaddr_len, flags);
-	if (tsa_worker_end(tops, &worker))
+	if (tsa_worker_end(trealsock, &worker))
 		return restart_syscall();
 	return ret;
 }
@@ -183,35 +223,36 @@ static int tsa_connect(struct socket *sock, struct sockaddr *vaddr,
 static int tsa_accept(struct socket *sock, struct socket *newsock, int flags,
 		      bool kern)
 {
-	struct tsa_proto_ops *tops;
+	struct tsa_realsock *trealsock;
 	struct tsa_worker worker;
 	struct socket *realsock;
 	int ret;
 
-	tops = tsa_worker_start(sock, &worker);
-	realsock = tops->realsock;
+	trealsock = tsa_worker_start(sock, &worker);
+	realsock = trealsock->realsock;
 	module_put(newsock->ops->owner);
 	newsock->ops = realsock->ops;
+	smp_wmb();
 	__module_get(realsock->ops->owner);
 	newsock->ops = realsock->ops;
 	pr_debug("Running accept, newsock's file: %p\n", newsock->file);
 	ret = realsock->ops->accept(realsock, newsock, flags, kern);
-	if (tsa_worker_end(tops, &worker))
+	if (tsa_worker_end(trealsock, &worker))
 		return restart_syscall();
 	return ret;
 }
 
 static int tsa_getname(struct socket *sock, struct sockaddr *addr, int peer)
 {
-	struct tsa_proto_ops *tops;
+	struct tsa_realsock *trealsock;
 	struct tsa_worker worker;
 	struct socket *realsock;
 	int ret;
 
-	tops = tsa_worker_start(sock, &worker);
-	realsock = tops->realsock;
+	trealsock = tsa_worker_start(sock, &worker);
+	realsock = trealsock->realsock;
 	ret = realsock->ops->getname(realsock, addr, peer);
-	if (tsa_worker_end(tops, &worker))
+	if (tsa_worker_end(trealsock, &worker))
 		return restart_syscall();
 	return ret;
 }
@@ -219,72 +260,76 @@ static int tsa_getname(struct socket *sock, struct sockaddr *addr, int peer)
 static int tsa_gettstamp(struct socket *sock, void __user *userstamp,
 			 bool timeval, bool time32)
 {
-	struct tsa_proto_ops *tops;
+	struct tsa_realsock *trealsock;
 	struct tsa_worker worker;
 	struct socket *realsock;
 	int ret;
 
-	tops = tsa_worker_start(sock, &worker);
-	realsock = tops->realsock;
-	ret = realsock->ops->gettstamp(realsock, userstamp, timeval, time32);
-	if (tsa_worker_end(tops, &worker))
+	trealsock = tsa_worker_start(sock, &worker);
+	realsock = trealsock->realsock;
+	if (realsock->ops->gettstamp)
+		ret = realsock->ops->gettstamp(realsock, userstamp, timeval, time32);
+	else
+		ret = -ENOIOCTLCMD;
+	if (tsa_worker_end(trealsock, &worker))
 		return restart_syscall();
 	return ret;
 }
 
 static int tsa_listen(struct socket *sock, int len)
 {
-	struct tsa_proto_ops *tops;
+	struct tsa_realsock *trealsock;
 	struct tsa_worker worker;
 	struct socket *realsock;
 	int ret;
 
-	tops = tsa_worker_start(sock, &worker);
-	realsock = tops->realsock;
+	trealsock = tsa_worker_start(sock, &worker);
+	realsock = trealsock->realsock;
 	ret = realsock->ops->listen(realsock, len);
 	/* Shouldn't block? */
-	tsa_worker_end(tops, &worker);
+	tsa_worker_end(trealsock, &worker);
 	return ret;
 }
 
 static int tsa_shutdown(struct socket *sock, int flags)
 {
-	struct tsa_proto_ops *tops;
+	struct tsa_realsock *trealsock;
 	struct tsa_worker worker;
 	struct socket *realsock;
 	int ret;
 
-	tops = tsa_worker_start(sock, &worker);
-	realsock = tops->realsock;
+	trealsock = tsa_worker_start(sock, &worker);
+	realsock = trealsock->realsock;
 	ret = realsock->ops->shutdown(realsock, flags);
 	/* Shouldn't block */
-	tsa_worker_end(tops, &worker);
+	tsa_worker_end(trealsock, &worker);
 	return ret;
 }
 
 static void tsa_show_fdinfo(struct seq_file *m, struct socket *sock)
 {
-	struct tsa_proto_ops *tops;
+	struct tsa_realsock *trealsock;
 	struct tsa_worker worker;
 	struct socket *realsock;
 
-	tops = tsa_worker_start(sock, &worker);
-	realsock = tops->realsock;
-	realsock->ops->show_fdinfo(m, realsock);
-	tsa_worker_end(tops, &worker);
+	trealsock = tsa_worker_start(sock, &worker);
+	realsock = trealsock->realsock;
+	if (realsock->ops->show_fdinfo)
+		realsock->ops->show_fdinfo(m, realsock);
+	tsa_worker_end(trealsock, &worker);
 }
 
 static int tsa_sendmsg(struct socket *sock, struct msghdr *m, size_t total_len)
 {
-	struct tsa_proto_ops *tops;
+	struct tsa_realsock *trealsock;
 	struct tsa_worker worker;
 	struct socket *realsock;
 	int ret;
 
-	tops = tsa_worker_start(sock, &worker);
-	realsock = tops->realsock;
+	trealsock = tsa_worker_start(sock, &worker);
+	realsock = trealsock->realsock;
 	ret = realsock->ops->sendmsg(realsock, m, total_len);
-	if (tsa_worker_end(tops, &worker))
+	if (tsa_worker_end(trealsock, &worker))
 		return restart_syscall();
 	return ret;
 }
@@ -292,15 +337,15 @@ static int tsa_sendmsg(struct socket *sock, struct msghdr *m, size_t total_len)
 static int tsa_recvmsg(struct socket *sock, struct msghdr *m, size_t total_len,
 		       int flags)
 {
-	struct tsa_proto_ops *tops;
+	struct tsa_realsock *trealsock;
 	struct tsa_worker worker;
 	struct socket *realsock;
 	int ret;
 
-	tops = tsa_worker_start(sock, &worker);
-	realsock = tops->realsock;
+	trealsock = tsa_worker_start(sock, &worker);
+	realsock = trealsock->realsock;
 	ret = realsock->ops->recvmsg(realsock, m, total_len, flags);
-	if (tsa_worker_end(tops, &worker))
+	if (tsa_worker_end(trealsock, &worker))
 		return restart_syscall();
 	return ret;
 }
@@ -308,15 +353,18 @@ static int tsa_recvmsg(struct socket *sock, struct msghdr *m, size_t total_len,
 static ssize_t tsa_sendpage(struct socket *sock, struct page *page, int offset,
 			    size_t size, int flags)
 {
-	struct tsa_proto_ops *tops;
+	struct tsa_realsock *trealsock;
 	struct tsa_worker worker;
 	struct socket *realsock;
 	int ret;
 
-	tops = tsa_worker_start(sock, &worker);
-	realsock = tops->realsock;
-	ret = realsock->ops->sendpage(realsock, page, offset, size, flags);
-	if (tsa_worker_end(tops, &worker))
+	trealsock = tsa_worker_start(sock, &worker);
+	realsock = trealsock->realsock;
+	if (realsock->ops->sendpage)
+		ret = realsock->ops->sendpage(realsock, page, offset, size, flags);
+	else
+		ret = sock_no_sendpage(sock, page, offset, size, flags);
+	if (tsa_worker_end(trealsock, &worker))
 		return restart_syscall();
 	return ret;
 }
@@ -325,15 +373,15 @@ static ssize_t tsa_splice_read(struct socket *sock, loff_t *ppos,
 			       struct pipe_inode_info *pipe, size_t len,
 			       unsigned int flags)
 {
-	struct tsa_proto_ops *tops;
+	struct tsa_realsock *trealsock;
 	struct tsa_worker worker;
 	struct socket *realsock;
 	int ret;
 
-	tops = tsa_worker_start(sock, &worker);
-	realsock = tops->realsock;
+	trealsock = tsa_worker_start(sock, &worker);
+	realsock = trealsock->realsock;
 	ret = realsock->ops->splice_read(realsock, ppos, pipe, len, flags);
-	if (tsa_worker_end(tops, &worker))
+	if (tsa_worker_end(trealsock, &worker))
 		return restart_syscall();
 	return ret;
 }
@@ -357,13 +405,13 @@ static int __tsa_ioctl_swap(struct socket *sock, unsigned int cmd,
 
 static int tsa_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 {
-	struct tsa_proto_ops *tops;
+	struct tsa_realsock *trealsock;
 	struct tsa_worker worker;
 	struct socket *realsock;
 	int ret;
 
-	tops = tsa_worker_start(sock, &worker);
-	realsock = tops->realsock;
+	trealsock = tsa_worker_start(sock, &worker);
+	realsock = trealsock->realsock;
 	switch (cmd) {
 	case SIOCTSASWAP:
 		ret = __tsa_ioctl_swap(sock, cmd, arg);
@@ -371,310 +419,336 @@ static int tsa_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 	default:
 		ret = realsock->ops->ioctl(realsock, cmd, arg);
 	}
-	tsa_worker_end(tops, &worker);
+	tsa_worker_end(trealsock, &worker);
 	return ret;
 }
 
 static int tsa_read_sock(struct sock *sk, read_descriptor_t *desc,
 			 sk_read_actor_t recv_actor)
 {
-	struct tsa_proto_ops *tops;
+	struct tsa_realsock *trealsock;
 	struct tsa_worker worker;
 	struct socket *realsock;
 	int ret;
 
-	tops = tsa_worker_start_sk(sk, &worker);
-	realsock = tops->realsock;
-	ret = realsock->ops->read_sock(realsock->sk, desc, recv_actor);
-	if (tsa_worker_end(tops, &worker))
-		return restart_syscall();
+	trealsock = tsa_worker_start_sk(sk, &worker);
+	realsock = trealsock->realsock;
+	if (!realsock->ops->read_sock)
+		ret = -EBUSY;
+	tsa_worker_end(trealsock, &worker);
 	return ret;
 }
 
 static int tsa_sendpage_locked(struct sock *sk, struct page *page, int offset,
 			       size_t size, int flags)
 {
-	struct tsa_proto_ops *tops;
+	struct tsa_realsock *trealsock;
 	struct tsa_worker worker;
 	struct socket *realsock;
 	int ret;
 
-	tops = tsa_worker_start_sk(sk, &worker);
-	realsock = tops->realsock;
-	ret = realsock->ops->sendpage_locked(realsock->sk, page, offset, size,
-					     flags);
-	tsa_worker_end(tops, &worker);
+	trealsock = tsa_worker_start_sk(sk, &worker);
+	realsock = trealsock->realsock;
+	if (realsock->ops->sendpage_locked)
+		ret = realsock->ops->sendpage_locked(sk, page, offset, size, flags);
+	else
+		ret = sock_no_sendpage_locked(sk, page, offset, size, flags);
+	tsa_worker_end(trealsock, &worker);
 	return ret;
 }
 
 static int tsa_sendmsg_locked(struct sock *sk, struct msghdr *msg, size_t size)
 {
-	struct tsa_proto_ops *tops;
+	struct tsa_realsock *trealsock;
 	struct tsa_worker worker;
 	struct socket *realsock;
 	int ret;
 
-	tops = tsa_worker_start_sk(sk, &worker);
-	realsock = tops->realsock;
-	ret = realsock->ops->sendmsg_locked(realsock->sk, msg, size);
-	tsa_worker_end(tops, &worker);
+	trealsock = tsa_worker_start_sk(sk, &worker);
+	realsock = trealsock->realsock;
+	if (realsock->ops->sendmsg_locked)
+		ret = realsock->ops->sendmsg_locked(sk, msg, size);
+	else
+		ret = sock_no_sendmsg_locked(sk, msg, size);
+	tsa_worker_end(trealsock, &worker);
 	return ret;
 }
 
 static int tsa_set_rcvlowat(struct sock *sk, int val)
 {
-	struct tsa_proto_ops *tops;
+	struct tsa_realsock *trealsock;
 	struct tsa_worker worker;
 	struct socket *realsock;
-	int ret;
+	int ret = 0;
 
-	tops = tsa_worker_start_sk(sk, &worker);
-	realsock = tops->realsock;
-	ret = realsock->ops->set_rcvlowat(realsock->sk, val);
-	tsa_worker_end(tops, &worker);
+	trealsock = tsa_worker_start_sk(sk, &worker);
+	realsock = trealsock->realsock;
+	if (val < 0)
+		val = INT_MAX;
+	if (realsock->ops->set_rcvlowat)
+		ret = realsock->ops->set_rcvlowat(sk, val);
+	else
+		WRITE_ONCE(sk->sk_rcvlowat, val ? : 1);
+	if (tsa_worker_end(trealsock, &worker))
+		return restart_syscall();
 	return ret;
 }
 
 static int tsa_set_peek_off(struct sock *sk, int val)
 {
-	struct tsa_proto_ops *tops;
+	struct tsa_realsock *trealsock;
 	struct tsa_worker worker;
 	struct socket *realsock;
 	int ret;
 
-	tops = tsa_worker_start_sk(sk, &worker);
-	realsock = tops->realsock;
-	ret = realsock->ops->set_peek_off(realsock->sk, val);
-	tsa_worker_end(tops, &worker);
+	trealsock = tsa_worker_start_sk(sk, &worker);
+	realsock = trealsock->realsock;
+	if (realsock->ops->set_peek_off)
+		ret = realsock->ops->set_peek_off(sk, val);
+	else
+		ret = -EOPNOTSUPP;
+	if (tsa_worker_end(trealsock, &worker))
+		return restart_syscall();
+
 	return ret;
 }
 
 static int tsa_peek_len(struct socket *sock)
 {
-	struct tsa_proto_ops *tops;
+	struct tsa_realsock *trealsock;
 	struct tsa_worker worker;
 	struct socket *realsock;
 	int ret;
 
-	tops = tsa_worker_start(sock, &worker);
-	realsock = tops->realsock;
+	trealsock = tsa_worker_start(sock, &worker);
+	realsock = trealsock->realsock;
+	WARN_ON(!realsock->ops->peek_len);
 	ret = realsock->ops->peek_len(realsock);
-	tsa_worker_end(tops, &worker);
+	tsa_worker_end(trealsock, &worker);
 	return ret;
 }
 
-static void __tsa_close_cb(struct work_struct *wq)
+static void __tsa_realsock_release_cb(struct work_struct *wq)
 {
-	struct tsa_proto_ops *tops;
+	struct tsa_realsock *trealsock;
 
-	tops = container_of(wq, struct tsa_proto_ops, work_close);
-	pr_debug("TSA Close CB called back on: %p\n", tops->realsock);
-	sock_release(tops->realsock);
-	module_put(tops->owner);
-	kfree(tops);
+	trealsock = container_of(wq, struct tsa_realsock, work_release);
+	pr_debug("TSA Close CB called back on: %p\n", trealsock->realsock);
+	sock_release(trealsock->realsock);
+	module_put(THIS_MODULE);
 }
 
-static void __tsa_shutdown_cb(struct work_struct *wq)
+static void tsa_srcu_realsock_cb(struct rcu_head *head)
 {
-	struct tsa_proto_ops *tops;
+	struct tsa_realsock *trealsock;
 
-	tops = container_of(wq, struct tsa_proto_ops, work_shutdown);
-	pr_debug("TSA shutdown CB called back on: %p\n", tops->realsock);
-	tops->realsock->ops->shutdown(tops->realsock, SHUT_RDWR);
-	spin_lock(&tops->worker_lock);
-	tops->shutdown = true;
-	if (list_empty(&tops->workers))
-		schedule_work(&tops->work_close);
-	spin_unlock(&tops->worker_lock);
-}
-
-static void tsa_rcu_tasks_cb(struct rcu_head *head)
-{
-	struct tsa_proto_ops *tops;
-
-	tops = container_of(head, struct tsa_proto_ops, task_rcu_head);
-	pr_debug("tsa_rcu_tasks_cb callback called on: %p\n", tops->realsock);
-	spin_lock(&tops->worker_lock);
-	tops->dying = true;
-	spin_unlock(&tops->worker_lock);
-	/* Shutdown must be called on a workqueue because it might block */
-	schedule_work(&tops->work_shutdown);
+	trealsock = container_of(head, struct tsa_realsock, srcu_head);
+	schedule_work(&trealsock->work_release);
 }
 
 /* This function may block */
-static void start_release_old_tops(const struct proto_ops *ops)
+static void start_release_old_tsa_realsock(struct tsa_realsock *trealsock)
 {
-	struct tsa_proto_ops *tops;
+	struct socket *realsock = trealsock->realsock;
 
-	tops = container_of(ops, struct tsa_proto_ops, real_ops);
-	pr_debug("Starting release of: %p\n", tops->realsock);
-	WARN_ON(!tops->realsock);
+	pr_debug("Starting release of: %p\n", trealsock->realsock);
+	WARN_ON(!trealsock->realsock);
+	trealsock->shutting_down = true;
+	smp_wmb();
 
-	call_rcu_tasks(&tops->task_rcu_head, tsa_rcu_tasks_cb);
+	/* Save real callbacks */
+	write_lock_bh(&realsock->sk->sk_callback_lock);
+	realsock->sk->sk_data_ready = trealsock->save_data_ready;
+	realsock->sk->sk_write_space = trealsock->save_write_space;
+	realsock->sk->sk_state_change = trealsock->save_state_change;
+	realsock->sk->sk_error_report = trealsock->save_error_report;
+	rcu_assign_pointer(realsock->sk->sk_wq, &realsock->wq);
+	realsock->sk->sk_socket = trealsock->realsock;
+	write_unlock_bh(&realsock->sk->sk_callback_lock);
+
+	call_srcu(trealsock->tsa_proto_ops_wrapper_srcu, &trealsock->srcu_head, tsa_srcu_realsock_cb);
+}
+
+static void start_release_old_sk(struct sock *sk)
+{
+	struct tsa_realsock *trealsock;
+
+	trealsock = sk->sk_user_data;
+	start_release_old_tsa_realsock(trealsock);
+}
+
+static void __tsa_free_tpow_cb(struct work_struct *wh)
+{
+	struct tsa_proto_ops_wrapper *tpow;
+
+	tpow = container_of(wh, struct tsa_proto_ops_wrapper, work_free);
+	cleanup_srcu_struct(&tpow->srcu);
+	kfree(tpow);
+}
+
+static void tsa_srcu_tpow_cb(struct rcu_head *head)
+{
+	struct tsa_proto_ops_wrapper *tpow;
+
+	tpow = container_of(head, struct tsa_proto_ops_wrapper, srcu_head);
+	schedule_work(&tpow->work_free);
 }
 
 static int tsa_release(struct socket *sock)
 {
+	struct tsa_proto_ops_wrapper *tpow;
+	struct tsa_realsock *trealsock;
+	struct tsa_worker worker;
+	struct socket *realsock;
+	int ret;
+
 	pr_debug("TSA release of top level socket: %p\n", sock);
-	start_release_old_tops(sock->ops);
 
-	return 0;
+	trealsock = tsa_worker_start(sock, &worker);
+	realsock = trealsock->realsock;
+	ret = realsock->ops->release(trealsock->realsock);
+	tsa_worker_end(trealsock, &worker);
+
+	pr_debug("trealsock: %p\n", trealsock);
+	start_release_old_tsa_realsock(trealsock);
+
+	tpow = sock_tpow(sock);
+	call_srcu(&tpow->srcu, &tpow->srcu_head, tsa_srcu_tpow_cb);
+	/* TODO: Release / free top-level socket */
+	return ret;
 }
 
-static inline void tsa_wake_async(struct tsa_proto_ops *tops, int how, int band)
-{
-	/* TODO: Assert sk->sk_callback_lock is held */
-	if (sock_flag(tops->realsock->sk, SOCK_FASYNC)) {
-		rcu_read_lock();
-		sock_wake_async(tops->tsasock->wq, how, band);
-		rcu_read_unlock();
-	}
-}
 
 static void tsa_data_ready(struct sock *sk)
 {
-	struct tsa_proto_ops *tops;
+	struct tsa_realsock *trealsock;
 	struct tsa_worker worker;
 	struct socket *tsasock;
 
 	read_lock_bh(&sk->sk_callback_lock);
-	tsasock = sk->sk_user_data;
-	if (!tsasock)
+	trealsock = sk->sk_user_data;
+	if (!trealsock) {
+		read_unlock_bh(&sk->sk_callback_lock);
 		return;
-	tops = tsa_worker_start(tsasock, &worker);
-	
-	tsa_worker_end(tops, &worker);
+	}
+
+	tsa_worker_start(trealsock->tsasock, &worker);
+	trealsock->save_data_ready(sk);
+	tsa_worker_end(trealsock, &worker);
 	read_unlock_bh(&sk->sk_callback_lock);
 }
 
 static void tsa_write_space(struct sock *sk)
 {
-	struct tsa_proto_ops *tops;
+	struct tsa_realsock *trealsock;
 	struct tsa_worker worker;
 	struct socket *tsasock;
 
 	read_lock_bh(&sk->sk_callback_lock);
-	tsasock = sk->sk_user_data;
-	if (!tsasock)
+	trealsock = sk->sk_user_data;
+	if (!trealsock) {
+		read_unlock_bh(&sk->sk_callback_lock);
 		return;
-	tops = tsa_worker_start(tsasock, &worker);
-	tops->save_write_space(sk);
-	tsa_worker_end(tops, &worker);
+	}
+
+	tsa_worker_start(trealsock->tsasock, &worker);
+	trealsock->save_write_space(sk);
+	tsa_worker_end(trealsock, &worker);
 	read_unlock_bh(&sk->sk_callback_lock);
 }
 
 static void tsa_state_change(struct sock *sk)
 {
-	struct tsa_proto_ops *tops;
+	struct tsa_realsock *trealsock;
 	struct tsa_worker worker;
 	struct socket *tsasock;
 
 	read_lock_bh(&sk->sk_callback_lock);
-	tsasock = sk->sk_user_data;
-	if (!tsasock)
+	trealsock = sk->sk_user_data;
+	if (!trealsock) {
+		read_unlock_bh(&sk->sk_callback_lock);
 		return;
-	tops = tsa_worker_start(tsasock, &worker);
-	tops->save_state_change(sk);
-	tsa_worker_end(tops, &worker);
+	}
+
+	tsa_worker_start(trealsock->tsasock, &worker);
+	trealsock->save_state_change(sk);
+	tsa_worker_end(trealsock, &worker);
 	read_unlock_bh(&sk->sk_callback_lock);
 }
 
 static void tsa_error_report(struct sock *sk)
 {
-	struct tsa_proto_ops *tops;
+	struct tsa_realsock *trealsock;
 	struct tsa_worker worker;
 	struct socket *tsasock;
 
 	read_lock_bh(&sk->sk_callback_lock);
-	tsasock = sk->sk_user_data;
-	if (!tsasock)
+	trealsock = sk->sk_user_data;
+	if (!trealsock) {
+		read_unlock_bh(&sk->sk_callback_lock);
 		return;
-	tops = tsa_worker_start(tsasock, &worker);
-	tops->save_error_report(sk);
-	tsa_worker_end(tops, &worker);
+	}
+
+	tsa_worker_start(trealsock->tsasock, &worker);
+	trealsock->save_error_report(sk);
+	tsa_worker_end(trealsock, &worker);
 	read_unlock_bh(&sk->sk_callback_lock);
 }
 
-/* There's not unwind code for this yet */
-static int init_proto_ops(struct tsa_proto_ops *tops, struct socket *newsock)
+static void tsa_destruct(struct sock *sk)
 {
-	struct proto_ops *fake_real_ops = &tops->real_ops;
+	struct tsa_realsock *trealsock;
 
-	if (!try_module_get(THIS_MODULE))
+	trealsock = sk->sk_user_data;
+	trealsock->save_destruct(sk);
+	kfree(trealsock);
+	pr_debug("tsa_destruct: %p\n", sk->sk_socket);
+}
+
+/* There's not unwind code for this yet */
+static int make_trealsock(struct socket *sock, struct socket *newsock)
+{
+	struct tsa_proto_ops_wrapper *tpow;
+	struct tsa_realsock *trealsock;
+	int ret;
+
+	tpow = sock_tpow(sock);
+	WARN_ON(sock->ops->release != tsa_release);
+	trealsock = kzalloc(sizeof(*trealsock), GFP_KERNEL);
+	if (!trealsock)
+		return -ENOMEM;
+
+	if (!try_module_get(THIS_MODULE)) {
+		kfree(trealsock);
 		return -EBUSY;
+	}
 
 	pr_debug("Creating underlying socket: %p\n", newsock);
-	spin_lock_init(&tops->worker_lock);
-	INIT_LIST_HEAD(&tops->workers);
-	tops->dying = false;
-	tops->shutdown = false;
-	tops->owner = THIS_MODULE;
-	kref_init(&tops->refcnt);
+
+	trealsock->realsock = newsock;
+	trealsock->tsasock = sock;
+	trealsock->tsa_proto_ops_wrapper_srcu = &tpow->srcu;
+	init_rcu_head(&trealsock->srcu_head);
+	INIT_WORK(&trealsock->work_release, __tsa_realsock_release_cb);
 
 	/* Save real callbacks */
 	write_lock_bh(&newsock->sk->sk_callback_lock);
-	tops->save_data_ready = newsock->sk->sk_data_ready;
-	tops->save_write_space = newsock->sk->sk_write_space;
-	tops->save_state_change = newsock->sk->sk_state_change;
-	tops->save_error_report = newsock->sk->sk_error_report;
 	WARN_ON(newsock->sk->sk_user_data);
-	newsock->sk->sk_user_data = tops->tsasock;
-	rcu_assign_pointer(newsock->sk->sk_wq, tops->tsasock->wq);
+	trealsock->save_data_ready = newsock->sk->sk_data_ready;
+	trealsock->save_write_space = newsock->sk->sk_write_space;
+	trealsock->save_state_change = newsock->sk->sk_state_change;
+	trealsock->save_error_report = newsock->sk->sk_error_report;
+	trealsock->save_destruct = newsock->sk->sk_destruct;
+	trealsock->realsock->sk->sk_user_data = trealsock;
 
 	newsock->sk->sk_data_ready = tsa_data_ready;
 	newsock->sk->sk_write_space = tsa_write_space;
 	newsock->sk->sk_state_change = tsa_state_change;
 	newsock->sk->sk_error_report = tsa_error_report;
-
+	newsock->sk->sk_destruct = tsa_destruct;
+	newsock->sk->sk_socket = sock;
+	rcu_assign_pointer(newsock->sk->sk_wq, &sock->wq);
 	write_unlock_bh(&newsock->sk->sk_callback_lock);
-
-	fake_real_ops->family = newsock->ops->family;
-	fake_real_ops->owner = THIS_MODULE;
-	fake_real_ops->release = tsa_release;
-	fake_real_ops->bind = tsa_bind;
-	fake_real_ops->connect = tsa_connect;
-	/* This is ugly. Let's not support anything that can do socketpair */
-	fake_real_ops->socketpair = sock_no_socketpair;
-	fake_real_ops->accept = tsa_accept;
-	fake_real_ops->getname = tsa_getname;
-	fake_real_ops->poll = tsa_poll;
-	fake_real_ops->ioctl = tsa_ioctl;
-	if (newsock->ops->gettstamp)
-		fake_real_ops->gettstamp = tsa_gettstamp;
-	fake_real_ops->listen = tsa_listen;
-	fake_real_ops->shutdown = tsa_shutdown;
-	fake_real_ops->setsockopt = tsa_setsockopt;
-	fake_real_ops->getsockopt = tsa_getsockopt;
-	if (newsock->ops->show_fdinfo)
-		fake_real_ops->show_fdinfo = tsa_show_fdinfo;
-	fake_real_ops->sendmsg = tsa_sendmsg;
-	fake_real_ops->recvmsg = tsa_recvmsg;
-	/* No supporting mmap, because that creates "interesting" problems if we release the underlying socket */
-	fake_real_ops->mmap = sock_no_mmap;
-	if (newsock->ops->sendpage)
-		fake_real_ops->sendpage = tsa_sendpage;
-	if (newsock->ops->splice_read)
-		fake_real_ops->splice_read = tsa_splice_read;
-
-	/* These are weird because they're not actually called through this layer. */
-
-	if (newsock->ops->set_peek_off)
-		fake_real_ops->set_peek_off = tsa_set_peek_off;
-	if (newsock->ops->peek_len)
-		fake_real_ops->peek_len = tsa_peek_len;
-	if (newsock->ops->read_sock)
-		fake_real_ops->read_sock = tsa_read_sock;
-	if (newsock->ops->sendpage_locked)
-		fake_real_ops->sendpage_locked = tsa_sendpage_locked;
-	if (newsock->ops->sendmsg_locked)
-		fake_real_ops->sendmsg_locked = tsa_sendmsg_locked;
-	if (newsock->ops->set_rcvlowat)
-		fake_real_ops->set_rcvlowat = tsa_set_rcvlowat;
-
-	tops->realsock = newsock;
-	init_rcu_head(&tops->task_rcu_head);
-	INIT_WORK(&tops->work_close, __tsa_close_cb);
-	INIT_WORK(&tops->work_shutdown, __tsa_shutdown_cb);
 
 	return 0;
 }
@@ -682,37 +756,27 @@ static int init_proto_ops(struct tsa_proto_ops *tops, struct socket *newsock)
 /* Underlying socket has to be a socket that was built in kernel, and is unused */
 static int tsa_make_socket(struct socket *sock, struct socket *underlyingsock)
 {
-	const struct proto_ops *oldops;
-	struct tsa_proto_ops *tops;
+	struct sock *sk;
 	int ret;
 
-	WARN_ON(!sock);
-	WARN_ON(!underlyingsock);
-	WARN_ON(!underlyingsock->ops);
+	sk = sock->sk;
 
-	oldops = sock->ops;
-	tops = kzalloc(sizeof(*tops), GFP_KERNEL);
-	if (!tops)
-		return -ENOMEM;
-
-	tops->tsasock = sock;
-	ret = init_proto_ops(tops, underlyingsock);
-	if (ret) {
-		kfree(tops);
+	ret = make_trealsock(sock, underlyingsock);
+	if (ret)
 		return ret;
-	}
 
 	write_seqlock(&tsa_seqlock);
 	sock->sk = underlyingsock->sk;
-	sock->ops = &tops->real_ops;
 	write_sequnlock(&tsa_seqlock);
-	/* Synchronization:
-	1. First do tasks RCU, that way we know that all tasks are at a "safepoint"
-	2. Wait for the refcnt to hit 0.
-	3. SRCU callback
-	 */
-	if (oldops)
-		start_release_old_tops(oldops);
+
+	if (sk)
+		start_release_old_sk(sk);
+
+	/* To make sure all the head callbacks are consistent */
+	synchronize_rcu();
+
+	/* Wake up any outstanding */
+	pr_warn("TODO: Wake up outstanding waiters\n");
 
 	return 0;
 }
@@ -817,6 +881,43 @@ static void copy_sockopts(struct sock *oldsk, struct sock *newsk)
 	newsk->sk_pacing_status = oldsk->sk_pacing_status;
 	newsk->sk_max_pacing_rate = oldsk->sk_max_pacing_rate;
 	newsk->sk_pacing_rate = oldsk->sk_pacing_rate;
+}
+
+static void tsa_make_wrapper(struct tsa_proto_ops_wrapper *tpow, int family)
+{
+	struct proto_ops *po = &tpow->real_ops;
+
+	po->family = family;
+	po->release = tsa_release;
+	po->bind = tsa_bind;
+	po->connect = tsa_connect;
+	/* This is ugly. Let's not support anything that can do socketpair */
+	po->socketpair = sock_no_socketpair;
+	po->accept = tsa_accept;
+	po->getname = tsa_getname;
+	po->poll = tsa_poll;
+	po->ioctl = tsa_ioctl;
+	po->gettstamp = tsa_gettstamp;
+	po->listen = tsa_listen;
+	po->shutdown = tsa_shutdown;
+	po->setsockopt = tsa_setsockopt;
+	po->getsockopt = tsa_getsockopt;
+	po->show_fdinfo = tsa_show_fdinfo;
+	po->sendmsg = tsa_sendmsg;
+	po->recvmsg = tsa_recvmsg;
+	/* No supporting mmap, because that creates "interesting" problems if we release the underlying socket */
+	po->mmap = sock_no_mmap;
+	po->sendpage = tsa_sendpage;
+	po->splice_read = tsa_splice_read;
+
+	/* These are weird because they're not actually called through this layer. */
+
+	po->set_peek_off = tsa_set_peek_off;
+	po->peek_len = tsa_peek_len;
+	po->read_sock = tsa_read_sock;
+	po->sendpage_locked = tsa_sendpage_locked;
+	po->sendmsg_locked = tsa_sendmsg_locked;
+	po->set_rcvlowat = tsa_set_rcvlowat;
 }
 
 static int __tsa_swap(struct net *net, struct socket *sock)
@@ -931,6 +1032,7 @@ static int tsa_create(struct sk_buff *skb, struct genl_info *info)
 	* values on failure */
 	struct nlattr *adomain, *atype, *aprotocol, *aflags, *anetnsfd;
 	struct socket *sock, *underlyingsock;
+	struct tsa_proto_ops_wrapper *tpow;
 	int domain, type, protocol, flags;
 	struct net *net = NULL;
 	struct sk_buff *reply;
@@ -1022,6 +1124,27 @@ static int tsa_create(struct sk_buff *skb, struct genl_info *info)
 		NL_SET_ERR_MSG_MOD(info->extack, "sock_alloc_file failed");
 		goto out_put_tsa_socket;
 	}
+
+	tpow = kzalloc(sizeof(*tpow), GFP_KERNEL);
+	if (!tpow) {
+		NL_SET_ERR_MSG_MOD(info->extack,
+				   "could not allocate tsa socket operations wrapper");
+		err = -ENOMEM;
+		goto out_put_tsa_socket;
+	}
+
+	err = init_srcu_struct(&tpow->srcu);
+	if (err) {
+		NL_SET_ERR_MSG_MOD(info->extack,
+				   "could not allocate srcu");
+		kfree(tpow);
+		goto out_put_tsa_socket;
+	}
+	INIT_WORK(&tpow->work_free, __tsa_free_tpow_cb);
+	init_rcu_head(&tpow->srcu_head);
+
+	tsa_make_wrapper(tpow, domain);
+	sock->ops = &tpow->real_ops;
 
 	err = tsa_make_socket(sock, underlyingsock);
 	if (err) {
