@@ -551,7 +551,7 @@ static void __tsa_realsock_shutdown_cb(struct work_struct *wq)
 	pr_debug("TSA Shutdown CB called back on: %px %px\n", trealsock, trealsock->realsock);
 	ret = trealsock->realsock->ops->shutdown(trealsock->realsock, SHUT_RDWR);
 	if (ret)
-		pr_info("tsa: Issue shutting down socket %p: %d\n", trealsock, ret);
+		pr_debug("tsa: Issue shutting down socket %p: %d\n", trealsock, ret);
 
 	pr_debug("Calling srcu (%px / %px)\n", trealsock, trealsock->realsock);
 	call_srcu(&trealsock->tpow->srcu, &trealsock->srcu_head, tsa_srcu_realsock_cb);
