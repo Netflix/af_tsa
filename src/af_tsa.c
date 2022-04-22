@@ -92,7 +92,7 @@ static int __tsa_swap(struct net *net, struct socket *sock);
 static int tsa_release(struct socket *sock);
 static void release_tpow(struct kref *kref);
 
-struct tsa_proto_ops_wrapper* sock_tpow(struct socket *sock)
+struct tsa_proto_ops_wrapper *sock_tpow(struct socket *sock)
 {
 	struct tsa_proto_ops_wrapper *tpow;
 	const struct proto_ops *po;
@@ -110,8 +110,7 @@ static void put_tpow(struct tsa_proto_ops_wrapper *tpow)
 	kref_put(&tpow->kref, release_tpow);
 }
 
-static struct tsa_realsock* tsa_worker_start(struct socket *sock,
-			     		     struct tsa_worker *worker)
+static struct tsa_realsock *tsa_worker_start(struct socket *sock, struct tsa_worker *worker)
 {
 	struct tsa_proto_ops_wrapper *tpow;
 	struct tsa_realsock *tsa_realsock;
@@ -131,14 +130,12 @@ retry:
 	return tsa_realsock;
 }
 
-static struct tsa_realsock* tsa_worker_start_sk(struct sock *sk,
-						struct tsa_worker *worker)
+static struct tsa_realsock *tsa_worker_start_sk(struct sock *sk, struct tsa_worker *worker)
 {
 	return tsa_worker_start(sk->sk_socket, worker);
 }
 
-static bool tsa_worker_end(struct tsa_realsock *realsock,
-			   struct tsa_worker *worker)
+static bool tsa_worker_end(struct tsa_realsock *realsock, struct tsa_worker *worker)
 {
 	struct tsa_proto_ops_wrapper *tpow;
 	bool shutting_down;
@@ -151,8 +148,7 @@ static bool tsa_worker_end(struct tsa_realsock *realsock,
 	return shutting_down;
 }
 
-static int tsa_setsockopt(struct socket *sock, int level, int optname,
-			  sockptr_t optval, unsigned int optlen)
+static int tsa_setsockopt(struct socket *sock, int level, int optname, sockptr_t optval, unsigned int optlen)
 {
 	struct tsa_realsock *trealsock;
 	struct tsa_worker worker;
@@ -165,8 +161,7 @@ static int tsa_setsockopt(struct socket *sock, int level, int optname,
 	return ret;
 }
 
-static int tsa_getsockopt(struct socket *sock, int level, int optname,
-			  char __user *optval, int __user *optlen)
+static int tsa_getsockopt(struct socket *sock, int level, int optname, char __user *optval, int __user *optlen)
 {
 	struct tsa_realsock *trealsock;
 	struct tsa_worker worker;
@@ -198,8 +193,7 @@ static __poll_t tsa_poll(struct file *file, struct socket *sock, poll_table *p)
 	return ret;
 }
 
-static int tsa_bind(struct socket *sock, struct sockaddr *myaddr,
-		    int sockaddr_len)
+static int tsa_bind(struct socket *sock, struct sockaddr *myaddr, int sockaddr_len)
 {
 	struct tsa_realsock *trealsock;
 	struct tsa_worker worker;
@@ -217,8 +211,7 @@ static int tsa_bind(struct socket *sock, struct sockaddr *myaddr,
 	return ret;
 }
 
-static int tsa_connect(struct socket *sock, struct sockaddr *vaddr,
-		       int sockaddr_len, int flags)
+static int tsa_connect(struct socket *sock, struct sockaddr *vaddr, int sockaddr_len, int flags)
 {
 	struct tsa_realsock *trealsock;
 	struct tsa_worker worker;
@@ -233,8 +226,7 @@ static int tsa_connect(struct socket *sock, struct sockaddr *vaddr,
 	return ret;
 }
 
-static int tsa_accept(struct socket *sock, struct socket *newsock, int flags,
-		      bool kern)
+static int tsa_accept(struct socket *sock, struct socket *newsock, int flags, bool kern)
 {
 	struct tsa_realsock *trealsock;
 	struct tsa_worker worker;
@@ -270,8 +262,7 @@ static int tsa_getname(struct socket *sock, struct sockaddr *addr, int peer)
 	return ret;
 }
 
-static int tsa_gettstamp(struct socket *sock, void __user *userstamp,
-			 bool timeval, bool time32)
+static int tsa_gettstamp(struct socket *sock, void __user *userstamp, bool timeval, bool time32)
 {
 	struct tsa_realsock *trealsock;
 	struct tsa_worker worker;
@@ -355,8 +346,7 @@ static int tsa_sendmsg(struct socket *sock, struct msghdr *m, size_t total_len)
 	return ret;
 }
 
-static int tsa_recvmsg(struct socket *sock, struct msghdr *m, size_t total_len,
-		       int flags)
+static int tsa_recvmsg(struct socket *sock, struct msghdr *m, size_t total_len, int flags)
 {
 	struct tsa_realsock *trealsock;
 	struct tsa_worker worker;
@@ -371,8 +361,7 @@ static int tsa_recvmsg(struct socket *sock, struct msghdr *m, size_t total_len,
 	return ret;
 }
 
-static ssize_t tsa_sendpage(struct socket *sock, struct page *page, int offset,
-			    size_t size, int flags)
+static ssize_t tsa_sendpage(struct socket *sock, struct page *page, int offset, size_t size, int flags)
 {
 	struct tsa_realsock *trealsock;
 	struct tsa_worker worker;
@@ -390,8 +379,7 @@ static ssize_t tsa_sendpage(struct socket *sock, struct page *page, int offset,
 	return ret;
 }
 
-static ssize_t tsa_splice_read(struct socket *sock, loff_t *ppos,
-			       struct pipe_inode_info *pipe, size_t len,
+static ssize_t tsa_splice_read(struct socket *sock, loff_t *ppos, struct pipe_inode_info *pipe, size_t len,
 			       unsigned int flags)
 {
 	struct tsa_realsock *trealsock;
@@ -407,8 +395,7 @@ static ssize_t tsa_splice_read(struct socket *sock, loff_t *ppos,
 	return ret;
 }
 
-static int __tsa_ioctl_swap(struct socket *sock, unsigned int cmd,
-			    unsigned long arg)
+static int __tsa_ioctl_swap(struct socket *sock, unsigned int cmd, unsigned long arg)
 {
 	struct net *net;
 	int ret;
@@ -444,8 +431,7 @@ static int tsa_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 	return ret;
 }
 
-static int tsa_read_sock(struct sock *sk, read_descriptor_t *desc,
-			 sk_read_actor_t recv_actor)
+static int tsa_read_sock(struct sock *sk, read_descriptor_t *desc, sk_read_actor_t recv_actor)
 {
 	struct tsa_realsock *trealsock;
 	struct tsa_worker worker;
@@ -460,8 +446,7 @@ static int tsa_read_sock(struct sock *sk, read_descriptor_t *desc,
 	return ret;
 }
 
-static int tsa_sendpage_locked(struct sock *sk, struct page *page, int offset,
-			       size_t size, int flags)
+static int tsa_sendpage_locked(struct sock *sk, struct page *page, int offset, size_t size, int flags)
 {
 	struct tsa_realsock *trealsock;
 	struct tsa_worker worker;
@@ -509,7 +494,7 @@ static int tsa_set_rcvlowat(struct sock *sk, int val)
 	if (realsock->ops->set_rcvlowat)
 		ret = realsock->ops->set_rcvlowat(sk, val);
 	else
-		WRITE_ONCE(sk->sk_rcvlowat, val ? : 1);
+		WRITE_ONCE(sk->sk_rcvlowat, val ?: 1);
 	if (tsa_worker_end(trealsock, &worker))
 		return restart_syscall();
 	return ret;
@@ -578,7 +563,8 @@ static void __tsa_realsock_release_cb(struct work_struct *wq)
 	struct tsa_realsock *trealsock;
 
 	trealsock = container_of(wq, struct tsa_realsock, work_release);
-	pr_debug("__tsa_realsock_release_cb: TSA Close CB called back on: %px / %px / %px\n", trealsock, trealsock->realsock, trealsock->tsasock);
+	pr_debug("__tsa_realsock_release_cb: TSA Close CB called back on: %px / %px / %px\n", trealsock,
+		 trealsock->realsock, trealsock->tsasock);
 	tpow = trealsock->tpow;
 	pr_debug("__tsa_realsock_release_cb: tpow: %px\n", tpow);
 	sock_release(trealsock->realsock);
@@ -667,7 +653,6 @@ static int tsa_release(struct socket *sock)
 	return 0;
 }
 
-
 static void tsa_data_ready(struct sock *sk)
 {
 	struct tsa_realsock *trealsock;
@@ -745,7 +730,7 @@ static void tsa_error_report(struct sock *sk)
 }
 
 /* There's not unwind code for this yet */
-static struct tsa_realsock* make_trealsock(struct socket *sock, struct socket *newsock)
+static struct tsa_realsock *make_trealsock(struct socket *sock, struct socket *newsock)
 {
 	struct tsa_proto_ops_wrapper *tpow;
 	struct tsa_realsock *trealsock;
@@ -762,7 +747,8 @@ static struct tsa_realsock* make_trealsock(struct socket *sock, struct socket *n
 	}
 
 	kref_get(&tpow->kref);
-	pr_debug("Wiring parent socket %px to newsock %px with trealsock %px, and tpow: %px\n", sock, newsock, trealsock, tpow);
+	pr_debug("Wiring parent socket %px to newsock %px with trealsock %px, and tpow: %px\n", sock, newsock,
+		 trealsock, tpow);
 
 	WARN_ON(!newsock);
 	WARN_ON(!sock);
@@ -876,10 +862,8 @@ static void copy_sockopts(struct sock *oldsk, struct sock *newsk)
 			newsk->sk_lingertime = oldsk->sk_lingertime;
 		if (val && flag == SOCK_TXTIME) {
 			newsk->sk_clockid = oldsk->sk_clockid;
-			newsk->sk_txtime_deadline_mode =
-				oldsk->sk_txtime_deadline_mode;
-			newsk->sk_txtime_report_errors =
-				oldsk->sk_txtime_report_errors;
+			newsk->sk_txtime_deadline_mode = oldsk->sk_txtime_deadline_mode;
+			newsk->sk_txtime_report_errors = oldsk->sk_txtime_report_errors;
 		}
 		/* We might be able to reduce the guarantees here and not require atomic ops */
 		sock_valbool_flag(newsk, flag, val);
@@ -888,8 +872,7 @@ static void copy_sockopts(struct sock *oldsk, struct sock *newsk)
 	WRITE_ONCE(newsk->sk_sndbuf, READ_ONCE(oldsk->sk_sndbuf));
 	WRITE_ONCE(newsk->sk_rcvbuf, READ_ONCE(oldsk->sk_rcvbuf));
 
-	newsk->sk_userlocks |=
-		oldsk->sk_userlocks & (SOCK_RCVBUF_LOCK | SOCK_SNDBUF_LOCK);
+	newsk->sk_userlocks |= oldsk->sk_userlocks & (SOCK_RCVBUF_LOCK | SOCK_SNDBUF_LOCK);
 	newsk->sk_no_check_tx = oldsk->sk_no_check_tx;
 	newsk->sk_priority = oldsk->sk_priority;
 	newsk->sk_tsflags = oldsk->sk_tsflags;
@@ -915,18 +898,14 @@ static void copy_sockopts(struct sock *oldsk, struct sock *newsk)
 	 * SO_LOCK_FILTER
 	 */
 
-	if (oldsk->sk_socket->ops->set_peek_off &&
-	    newsk->sk_socket->ops->set_peek_off)
-		newsk->sk_socket->ops->set_peek_off(
-			newsk, READ_ONCE(oldsk->sk_peek_off));
+	if (oldsk->sk_socket->ops->set_peek_off && newsk->sk_socket->ops->set_peek_off)
+		newsk->sk_socket->ops->set_peek_off(newsk, READ_ONCE(oldsk->sk_peek_off));
 
 	WRITE_ONCE(newsk->sk_ll_usec, READ_ONCE(oldsk->sk_ll_usec));
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,11,0)
-	WRITE_ONCE(newsk->sk_prefer_busy_poll,
-		READ_ONCE(oldsk->sk_prefer_busy_poll));
-	WRITE_ONCE(newsk->sk_busy_poll_budget,
-		READ_ONCE(oldsk->sk_busy_poll_budget));
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5,12,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
+	WRITE_ONCE(newsk->sk_prefer_busy_poll, READ_ONCE(oldsk->sk_prefer_busy_poll));
+	WRITE_ONCE(newsk->sk_busy_poll_budget, READ_ONCE(oldsk->sk_busy_poll_budget));
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 12, 0)
 #error "Untested kernel version"
 #endif
 	newsk->sk_pacing_status = oldsk->sk_pacing_status;
@@ -1021,18 +1000,14 @@ static int tsa_swap(struct sk_buff *skb, struct genl_info *info)
 	fd = nla_get_u32(afd);
 	sock = sockfd_lookup(fd, &err);
 	if (!sock) {
-		NL_SET_ERR_MSG_MOD(info->extack,
-				   "Could not perform sockfd_lookup");
+		NL_SET_ERR_MSG_MOD(info->extack, "Could not perform sockfd_lookup");
 		return err;
 	}
 
 	if (sock->ops->release != tsa_release) {
 		err = -EINVAL;
-		NL_SET_ERR_MSG_MOD(
-			info->extack,
-			"Tried to swap FD that was not created by AF_TSA");
-		pr_warn_ratelimited(
-			"af_tsa: Tried to swap FD that was not created by AF_TSA\n");
+		NL_SET_ERR_MSG_MOD(info->extack, "Tried to swap FD that was not created by AF_TSA");
+		pr_warn_ratelimited("af_tsa: Tried to swap FD that was not created by AF_TSA\n");
 		goto out;
 	}
 
@@ -1064,8 +1039,7 @@ int tsa_create_reply(int fd, struct sk_buff *skb, struct genl_info *info)
 	void *head;
 	int err = -EMSGSIZE;
 
-	head = genlmsg_put(skb, info->snd_portid, info->snd_seq, &genl_family,
-			   0, TSA_C_CREATE);
+	head = genlmsg_put(skb, info->snd_portid, info->snd_seq, &genl_family, 0, TSA_C_CREATE);
 	if (!head)
 		goto err;
 
@@ -1132,22 +1106,19 @@ static int tsa_create(struct sk_buff *skb, struct genl_info *info)
 
 	err = __sock_create(net, domain, type, protocol, &underlyingsock, 0);
 	if (err) {
-		NL_SET_ERR_MSG_MOD(info->extack,
-				   "could not create underlying socket");
+		NL_SET_ERR_MSG_MOD(info->extack, "could not create underlying socket");
 		goto out_put_net;
 	}
 
 	reply = nlmsg_new(NLMSG_DEFAULT_SIZE, GFP_KERNEL);
 	if (!reply) {
-		NL_SET_ERR_MSG_MOD(info->extack,
-				   "could not allocate memory for reply");
+		NL_SET_ERR_MSG_MOD(info->extack, "could not allocate memory for reply");
 		err = -ENOMEM;
 		goto out_put_sock;
 	}
 
 	if (!try_module_get(THIS_MODULE)) {
-		NL_SET_ERR_MSG_MOD(info->extack,
-				   "could not fetch module failed");
+		NL_SET_ERR_MSG_MOD(info->extack, "could not fetch module failed");
 		err = -EBUSY;
 		goto out_put_msg;
 	}
@@ -1181,16 +1152,14 @@ static int tsa_create(struct sk_buff *skb, struct genl_info *info)
 
 	tpow = kzalloc(sizeof(*tpow), GFP_KERNEL);
 	if (!tpow) {
-		NL_SET_ERR_MSG_MOD(info->extack,
-				   "could not allocate tsa socket operations wrapper");
+		NL_SET_ERR_MSG_MOD(info->extack, "could not allocate tsa socket operations wrapper");
 		err = -ENOMEM;
 		goto out_put_tsa_socket;
 	}
 
 	err = init_srcu_struct(&tpow->srcu);
 	if (err) {
-		NL_SET_ERR_MSG_MOD(info->extack,
-				   "could not allocate srcu");
+		NL_SET_ERR_MSG_MOD(info->extack, "could not allocate srcu");
 		kfree(tpow);
 		goto out_put_tsa_socket;
 	}
