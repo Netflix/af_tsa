@@ -561,11 +561,14 @@ static void tsa_srcu_realsock_cb(struct rcu_head *head)
 static void __tsa_realsock_shutdown_cb(struct work_struct *wq)
 {
 	struct tsa_realsock *trealsock;
+	int ret;
 
 	trealsock = container_of(wq, struct tsa_realsock, work_shutdown);
 	pr_debug("TSA Shutdown CB called back on: %px %px\n", trealsock, trealsock->realsock);
-//	trealsock->realsock->ops->shutdown(trealsock->realsock, SHUT_RDWR);
-// TODO: Call Release as well.
+	ret = trealsock->realsock->ops->shutdown(trealsock->realsock, SHUT_RDWR);
+	if (ret)
+		pr_info("tsa: Issue shutting down socket %p: %d\n", trealsock, ret);
+
 	pr_debug("Calling srcu (%px / %px)\n", trealsock, trealsock->realsock);
 	call_srcu(&trealsock->tpow->srcu, &trealsock->srcu_head, tsa_srcu_realsock_cb);
 }
@@ -579,9 +582,7 @@ static void __tsa_realsock_release_cb(struct work_struct *wq)
 	pr_debug("__tsa_realsock_release_cb: TSA Close CB called back on: %px / %px / %px\n", trealsock, trealsock->realsock, trealsock->tsasock);
 	tpow = trealsock->tpow;
 	pr_debug("__tsa_realsock_release_cb: tpow: %px\n", tpow);
-	put_tpow(tpow);
 	sock_release(trealsock->realsock);
-	module_put(THIS_MODULE);
 }
 
 static void release_tpow(struct kref *kref)
@@ -590,6 +591,7 @@ static void release_tpow(struct kref *kref)
 
 	tpow = container_of(kref, struct tsa_proto_ops_wrapper, kref);
 	pr_debug("release tpow: %px\n", tpow);
+	srcu_barrier(&tpow->srcu);
 	cleanup_srcu_struct(&tpow->srcu);
 	kfree(tpow);
 }
@@ -657,6 +659,7 @@ static int tsa_release(struct socket *sock)
 	tpow = sock_tpow(sock);
 	pr_debug("tsa_release: trealsock: %px\n", tpow->tsa_realsock);
 	start_release_old_tsa_realsock(tpow->tsa_realsock);
+	synchronize_rcu();
 	schedule_work(&tpow->work_free);
 	/* TODO: Release / free top-level socket */
 	return 0;
@@ -743,8 +746,13 @@ static void tsa_destruct(struct sock *sk)
 {
 	struct tsa_realsock *trealsock;
 
+	pr_debug("tsa_destruct (start): sk: %px\n", sk);
+	WARN_ON(!sk);
 	trealsock = sk->sk_user_data;
+	WARN_ON(!trealsock);
 	trealsock->save_destruct(sk);
+	put_tpow(trealsock->tpow);
+	module_put(THIS_MODULE);
 	kfree(trealsock);
 	pr_debug("tsa_destruct: trealsock: %px sk: %px sk_socket: %px\n", trealsock, sk, sk->sk_socket);
 }
