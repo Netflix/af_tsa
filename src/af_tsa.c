@@ -64,7 +64,6 @@ struct tsa_realsock {
 	void (*save_data_ready)(struct sock *sk);
 	void (*save_write_space)(struct sock *sk);
 	void (*save_error_report)(struct sock *sk);
-	void (*save_destruct)(struct sock *sk);
 
 	/* Is this socket shutting down? */
 	bool shutting_down;
@@ -583,6 +582,9 @@ static void __tsa_realsock_release_cb(struct work_struct *wq)
 	tpow = trealsock->tpow;
 	pr_debug("__tsa_realsock_release_cb: tpow: %px\n", tpow);
 	sock_release(trealsock->realsock);
+	put_tpow(trealsock->tpow);
+	module_put(THIS_MODULE);
+	kfree(trealsock);
 }
 
 static void release_tpow(struct kref *kref)
@@ -742,21 +744,6 @@ static void tsa_error_report(struct sock *sk)
 	read_unlock_bh(&sk->sk_callback_lock);
 }
 
-static void tsa_destruct(struct sock *sk)
-{
-	struct tsa_realsock *trealsock;
-
-	pr_debug("tsa_destruct (start): sk: %px\n", sk);
-	WARN_ON(!sk);
-	trealsock = sk->sk_user_data;
-	WARN_ON(!trealsock);
-	trealsock->save_destruct(sk);
-	put_tpow(trealsock->tpow);
-	module_put(THIS_MODULE);
-	kfree(trealsock);
-	pr_debug("tsa_destruct: trealsock: %px sk: %px sk_socket: %px\n", trealsock, sk, sk->sk_socket);
-}
-
 /* There's not unwind code for this yet */
 static struct tsa_realsock* make_trealsock(struct socket *sock, struct socket *newsock)
 {
@@ -795,14 +782,12 @@ static struct tsa_realsock* make_trealsock(struct socket *sock, struct socket *n
 	trealsock->save_write_space = newsock->sk->sk_write_space;
 	trealsock->save_state_change = newsock->sk->sk_state_change;
 	trealsock->save_error_report = newsock->sk->sk_error_report;
-	trealsock->save_destruct = newsock->sk->sk_destruct;
 	trealsock->realsock->sk->sk_user_data = trealsock;
 
 	newsock->sk->sk_data_ready = tsa_data_ready;
 	newsock->sk->sk_write_space = tsa_write_space;
 	newsock->sk->sk_state_change = tsa_state_change;
 	newsock->sk->sk_error_report = tsa_error_report;
-	newsock->sk->sk_destruct = tsa_destruct;
 	newsock->sk->sk_socket = sock;
 	rcu_assign_pointer(newsock->sk->sk_wq, &sock->wq);
 	write_unlock_bh(&newsock->sk->sk_callback_lock);
