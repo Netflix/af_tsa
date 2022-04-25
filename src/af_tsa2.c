@@ -50,6 +50,9 @@ static DEFINE_SEQLOCK(tsa_seqlock);
 static DEFINE_MUTEX(tsa_mutex);
 static struct genl_family genl_family;
 
+static struct kmem_cache *tsa_realsock_cachep __read_mostly = NULL;
+static struct kmem_cache *tsa_tpow_cachep __read_mostly = NULL;
+
 struct tsa_worker {
 	int srcu_idx;
 };
@@ -570,7 +573,7 @@ static void __tsa_realsock_release_cb(struct work_struct *wq)
 	sock_release(trealsock->realsock);
 	put_tpow(trealsock->tpow);
 	module_put(THIS_MODULE);
-	kfree(trealsock);
+	kmem_cache_free(tsa_realsock_cachep, trealsock);
 }
 
 static void release_tpow(struct kref *kref)
@@ -581,7 +584,7 @@ static void release_tpow(struct kref *kref)
 	pr_debug("release tpow: %px\n", tpow);
 	srcu_barrier(&tpow->srcu);
 	cleanup_srcu_struct(&tpow->srcu);
-	kfree(tpow);
+	kmem_cache_free(tsa_tpow_cachep, tpow);
 }
 
 /* This function may block */
@@ -737,12 +740,12 @@ static struct tsa_realsock *make_trealsock(struct socket *sock, struct socket *n
 
 	tpow = sock_tpow(sock);
 	WARN_ON(sock->ops->release != tsa_release);
-	trealsock = kzalloc(sizeof(*trealsock), GFP_KERNEL);
+	trealsock = kmem_cache_zalloc(tsa_realsock_cachep, GFP_KERNEL);
 	if (!trealsock)
 		return ERR_PTR(-ENOMEM);
 
 	if (!try_module_get(THIS_MODULE)) {
-		kfree(trealsock);
+		kmem_cache_free(tsa_realsock_cachep, trealsock);
 		return ERR_PTR(-EBUSY);
 	}
 
@@ -1150,7 +1153,7 @@ static int tsa_create(struct sk_buff *skb, struct genl_info *info)
 		goto out_put_tsa_socket;
 	}
 
-	tpow = kzalloc(sizeof(*tpow), GFP_KERNEL);
+	tpow = kmem_cache_zalloc(tsa_tpow_cachep, GFP_KERNEL);
 	if (!tpow) {
 		NL_SET_ERR_MSG_MOD(info->extack, "could not allocate tsa socket operations wrapper");
 		err = -ENOMEM;
@@ -1160,7 +1163,7 @@ static int tsa_create(struct sk_buff *skb, struct genl_info *info)
 	err = init_srcu_struct(&tpow->srcu);
 	if (err) {
 		NL_SET_ERR_MSG_MOD(info->extack, "could not allocate srcu");
-		kfree(tpow);
+		kmem_cache_free(tsa_tpow_cachep, tpow);
 		goto out_put_tsa_socket;
 	}
 	INIT_WORK(&tpow->work_free, __tsa_free_tpow_cb);
@@ -1255,12 +1258,34 @@ static struct genl_family genl_family = {
 
 static int __init tsa_init(void)
 {
-	return genl_register_family(&genl_family);
+	int ret = -ENOMEM;
+
+	tsa_realsock_cachep =
+		kmem_cache_create("tsa_realsock_cache", sizeof(struct tsa_realsock), 0, SLAB_HWCACHE_ALIGN, NULL);
+	if (!tsa_realsock_cachep)
+		goto fail;
+
+	tsa_tpow_cachep =
+		kmem_cache_create("tsa_tpow_cache", sizeof(struct tsa_proto_ops_wrapper), 0, SLAB_HWCACHE_ALIGN, NULL);
+	if (!tsa_tpow_cachep)
+		goto fail;
+
+	ret = genl_register_family(&genl_family);
+	if (ret)
+		goto fail;
+	return 0;
+
+fail:
+	kmem_cache_destroy(tsa_realsock_cachep);
+	kmem_cache_destroy(tsa_tpow_cachep);
+	return ret;
 }
 
 static void __exit tsa_exit(void)
 {
 	genl_unregister_family(&genl_family);
+	kmem_cache_destroy(tsa_realsock_cachep);
+	kmem_cache_destroy(tsa_tpow_cachep);
 }
 
 module_init(tsa_init);
