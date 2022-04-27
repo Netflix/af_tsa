@@ -1254,6 +1254,7 @@ static struct genl_family genl_family = {
 	.version = TSA_GENL_VERSION,
 	.module = THIS_MODULE,
 	.netnsok = true,
+	.parallel_ops = true,
 };
 
 static int __init tsa_init(void)
