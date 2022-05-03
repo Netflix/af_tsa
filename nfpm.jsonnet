@@ -11,6 +11,7 @@ std.manifestYamlDoc({
   maintainer: 'Sargun Dhillon <sargun@sargun.me>',
   description: 'Kernel Module for AF TSA',
   license: '(GPL-2.0 WITH Linux-syscall-note) OR BSD-3-Clause-No-Nuclear-Warranty',
+  provides: ['aftsa2'],
   scripts: {
     postinstall: 'tmp/postInstall.sh',
     preremove: 'tmp/preRemove.sh',
