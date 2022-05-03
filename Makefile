@@ -38,7 +38,7 @@ tmp/preRemove.sh:
 
 .PHONY: tmp/nfpm.yaml
 tmp/nfpm.yaml: nfpm.jsonnet
-	jsonnet --ext-str version=$(VERSION) --ext-str srcdir=/usr/src/af_tsa-${VERSION} -S nfpm.jsonnet > tmp/nfpm.yaml
+	jsonnet --ext-str version=$(VERSION) --ext-str buildtime=$(shell date -u +%Y%m%d%H%M) --ext-str srcdir=/usr/src/af_tsa-${VERSION} -S nfpm.jsonnet > tmp/nfpm.yaml
 
 .PHONY: tmp/dkms.conf
 tmp/dkms.conf:
