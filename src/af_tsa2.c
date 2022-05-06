@@ -102,6 +102,8 @@ struct tsa_proto_ops_wrapper *sock_tpow(struct socket *sock)
 
 	WARN_ON(!sock);
 	po = sock->ops;
+	if (!po)
+		return NULL;
 	WARN_ON(!po);
 	WARN_ON(po->release != tsa_release);
 	tpow = container_of(po, struct tsa_proto_ops_wrapper, real_ops);
@@ -122,6 +124,8 @@ static struct tsa_realsock *tsa_worker_start(struct socket *sock, struct tsa_wor
 retry:
 	seq = read_seqbegin(&tsa_seqlock);
 	tpow = sock_tpow(sock);
+	if (!tpow)
+		return NULL;
 	tsa_realsock = tpow->tsa_realsock;
 	if (read_seqretry(&tsa_seqlock, seq)) {
 		goto retry;
@@ -144,6 +148,8 @@ static bool tsa_worker_end(struct tsa_realsock *realsock, struct tsa_worker *wor
 	bool shutting_down;
 
 	tpow = sock_tpow(realsock->tsasock);
+        if (!tpow)
+                return realsock->shutting_down;
 	smp_rmb();
 	shutting_down = realsock->shutting_down;
 	srcu_read_unlock(&tpow->srcu, worker->srcu_idx);
@@ -565,6 +571,7 @@ static void __tsa_realsock_release_cb(struct work_struct *wq)
 	struct tsa_proto_ops_wrapper *tpow;
 	struct tsa_realsock *trealsock;
 
+	write_seqlock(&tsa_seqlock);
 	trealsock = container_of(wq, struct tsa_realsock, work_release);
 	pr_debug("__tsa_realsock_release_cb: TSA Close CB called back on: %px / %px / %px\n", trealsock,
 		 trealsock->realsock, trealsock->tsasock);
@@ -572,6 +579,7 @@ static void __tsa_realsock_release_cb(struct work_struct *wq)
 	pr_debug("__tsa_realsock_release_cb: tpow: %px\n", tpow);
 	sock_release(trealsock->realsock);
 	put_tpow(trealsock->tpow);
+	write_sequnlock(&tsa_seqlock);
 	module_put(THIS_MODULE);
 	kmem_cache_free(tsa_realsock_cachep, trealsock);
 }
@@ -648,6 +656,8 @@ static int tsa_release(struct socket *sock)
 	pr_debug("tsa_release: TSA release of top level socket: %px\n", sock);
 
 	tpow = sock_tpow(sock);
+        if (!tpow)
+                return 0;
 	pr_debug("tsa_release: trealsock: %px\n", tpow->tsa_realsock);
 	start_release_old_tsa_realsock(tpow->tsa_realsock);
 	synchronize_rcu();
