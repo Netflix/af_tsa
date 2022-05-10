@@ -46,7 +46,7 @@ enum {
 };
 #define TSA_A_MAX (__TSA_A_MAX - 1)
 
-#define TSA_GENL_NAME "af_tsa2"
+#define TSA_GENL_NAME "af_tsa3"
 #define TSA_GENL_VERSION 1
 
 /* Let's start at 10 to avoid stomping on anyone */
