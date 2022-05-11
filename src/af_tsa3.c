@@ -712,7 +712,8 @@ static void tsa_state_change(struct sock *sk)
 
 	read_lock_bh(&sk->sk_callback_lock);
 	trealsock = sk->sk_user_data;
-	if (!trealsock) {
+	smp_wmb();
+	if (!trealsock || (trealsock && trealsock->shutting_down)) {
 		read_unlock_bh(&sk->sk_callback_lock);
 		return;
 	}
