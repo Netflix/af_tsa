@@ -604,7 +604,7 @@ static void start_release_old_tsa_realsock(struct tsa_realsock *trealsock)
 	pr_debug("trealsock: %px\n", trealsock->realsock);
 	WARN_ON(!trealsock->realsock);
 	trealsock->shutting_down = true;
-	smp_wmb();
+	smp_mb();
 
 	/* Save real callbacks */
 	pr_debug("SK: %px\n", realsock->sk);
@@ -670,13 +670,13 @@ static void tsa_data_ready(struct sock *sk)
 {
 	struct tsa_realsock *trealsock;
 	struct tsa_worker worker;
-	struct socket *tsasock;
 
 	read_lock_bh(&sk->sk_callback_lock);
 	trealsock = sk->sk_user_data;
-	if (!trealsock) {
-		read_unlock_bh(&sk->sk_callback_lock);
-		return;
+	smp_mb__after_atomic();
+	if (!trealsock || (trealsock && trealsock->shutting_down)) {
+			read_unlock_bh(&sk->sk_callback_lock);
+			return;
 	}
 
 	tsa_worker_start(trealsock->tsasock, &worker);
@@ -689,13 +689,13 @@ static void tsa_write_space(struct sock *sk)
 {
 	struct tsa_realsock *trealsock;
 	struct tsa_worker worker;
-	struct socket *tsasock;
 
 	read_lock_bh(&sk->sk_callback_lock);
 	trealsock = sk->sk_user_data;
-	if (!trealsock) {
-		read_unlock_bh(&sk->sk_callback_lock);
-		return;
+	smp_mb__after_atomic();
+	if (!trealsock || (trealsock && trealsock->shutting_down)) {
+			read_unlock_bh(&sk->sk_callback_lock);
+			return;
 	}
 
 	tsa_worker_start(trealsock->tsasock, &worker);
@@ -708,14 +708,13 @@ static void tsa_state_change(struct sock *sk)
 {
 	struct tsa_realsock *trealsock;
 	struct tsa_worker worker;
-	struct socket *tsasock;
 
 	read_lock_bh(&sk->sk_callback_lock);
 	trealsock = sk->sk_user_data;
-	smp_wmb();
+	smp_mb__after_atomic();
 	if (!trealsock || (trealsock && trealsock->shutting_down)) {
-		read_unlock_bh(&sk->sk_callback_lock);
-		return;
+			read_unlock_bh(&sk->sk_callback_lock);
+			return;
 	}
 
 	tsa_worker_start(trealsock->tsasock, &worker);
@@ -728,13 +727,13 @@ static void tsa_error_report(struct sock *sk)
 {
 	struct tsa_realsock *trealsock;
 	struct tsa_worker worker;
-	struct socket *tsasock;
 
 	read_lock_bh(&sk->sk_callback_lock);
 	trealsock = sk->sk_user_data;
-	if (!trealsock) {
-		read_unlock_bh(&sk->sk_callback_lock);
-		return;
+	smp_mb__after_atomic();
+	if (!trealsock || (trealsock && trealsock->shutting_down)) {
+			read_unlock_bh(&sk->sk_callback_lock);
+			return;
 	}
 
 	tsa_worker_start(trealsock->tsasock, &worker);
