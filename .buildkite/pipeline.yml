@@ -15,6 +15,6 @@ steps:
       env:
         CALLER_BUILD_ID: "${BUILDKITE_BUILD_ID}"
         CALLER_JOB_ID: "${BUILDKITE_JOB_ID}"
-        CALLER_UPLOAD_DEB: "build/aftsa_latest.deb"
-        CALLER_PACKAGE_NAME: "aftsa"
+        CALLER_UPLOAD_DEB: "build/aftsa-multi_latest.deb"
+        CALLER_PACKAGE_NAME: "aftsa-multi"
         BUILDKITE_CLEAN_CHECKOUT: "true"
