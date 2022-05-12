@@ -1,7 +1,7 @@
 local srcdir = std.rstripChars(std.extVar('srcdir'), '/') + '/';
 
 std.manifestYamlDoc({
-  name: 'aftsa',
+  name: 'aftsa-multi',
   arch: 'amd64',
   platform: 'linux',
   version: std.extVar('version'),
@@ -11,7 +11,6 @@ std.manifestYamlDoc({
   maintainer: 'Sargun Dhillon <sargun@sargun.me>',
   description: 'Kernel Module for AF TSA',
   license: '(GPL-2.0 WITH Linux-syscall-note) OR BSD-3-Clause-No-Nuclear-Warranty',
-  provides: ['aftsa2', 'aftsa0' + std.extVar('buildtime')],
   scripts: {
     postinstall: 'tmp/postInstall.sh',
     preremove: 'tmp/preRemove.sh',
