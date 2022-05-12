@@ -8,7 +8,7 @@ PACKAGE_VERSION="${VERSION}"
 CLEAN="make clean"
 MAKE[0]="make -C \${kernel_source_dir} M=\${dkms_tree}/\${PACKAGE_NAME}/\${PACKAGE_VERSION}/build"
 CLEAN="make -C \${kernel_source_dir} M=\${dkms_tree}/\${PACKAGE_NAME}/\${PACKAGE_VERSION}/build clean"
-BUILT_MODULE_NAME[0]="af_tsa2"
+BUILT_MODULE_NAME[0]="af_tsa3"
 DEST_MODULE_LOCATION[0]="/extra"
 AUTOINSTALL="yes"
 EOF
