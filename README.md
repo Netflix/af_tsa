@@ -28,7 +28,7 @@ The only supported platform is Ubuntu Bionic running a 5.10+ kernel.
 
 ```
 curl -s https://packagecloud.io/install/repositories/netflix/titus/script.deb.sh | sudo bash
-apt-get install -y aftsa
+apt-get install -y aftsa-multi
 ```
 
 ## Caveats
