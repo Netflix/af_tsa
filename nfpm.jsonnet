@@ -8,6 +8,8 @@ std.manifestYamlDoc({
   section: 'default',
   priority: 'extra',
   depends: ['dkms'],
+  replaces: ['aftsa'],
+  conflicts: ['aftsa'],
   maintainer: 'Sargun Dhillon <sargun@sargun.me>',
   description: 'Kernel Module for AF TSA',
   license: '(GPL-2.0 WITH Linux-syscall-note) OR BSD-3-Clause-No-Nuclear-Warranty',
