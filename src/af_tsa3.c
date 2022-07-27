@@ -19,25 +19,15 @@ MODULE_AUTHOR("Sargun Dhillon <sargun@sargun.me>");
 MODULE_LICENSE("Dual BSD/GPL");
 MODULE_ALIAS_NET_PF_PROTO_NAME(PF_NETLINK, NETLINK_GENERIC, TSA_GENL_NAME);
 
-static DEFINE_MUTEX(tsa_mutex);
 static struct genl_family genl_family;
-
-static void __tsa_swap(struct net *net, struct socket *sock)
-{
-	struct sock *oldsk;
-
-	oldsk = sock->sk;
-	lock_sock(oldsk);
-	write_pnet(&oldsk->sk_net, net);
-	release_sock(oldsk);
-}
 
 static int tsa_swap(struct sk_buff *skb, struct genl_info *info)
 {
 	struct nlattr *afd, *anetnsfd;
-	struct net *net = NULL;
+	struct net *other, *mine;
 	struct socket *sock;
-	int err, fd;
+	struct sock *sk;
+	int err = 0, fd;
 
 	afd = info->attrs[TSA_C_SWAP_A_FD];
 	if (!afd) {
@@ -55,23 +45,22 @@ static int tsa_swap(struct sk_buff *skb, struct genl_info *info)
 	}
 
 	if (anetnsfd) {
-		net = get_net_ns_by_fd(nla_get_u32(anetnsfd));
-		if (IS_ERR(net)) {
-			err = PTR_ERR(net);
+		other = get_net_ns_by_fd(nla_get_u32(anetnsfd));
+		if (IS_ERR(other)) {
+			err = PTR_ERR(other);
 			goto out;
 		}
 	} else {
-		net = get_net(current->nsproxy->net_ns);
+		other = get_net(current->nsproxy->net_ns);
 	}
 
-	err = mutex_lock_killable(&tsa_mutex);
-	if (err)
-		goto out_put_net;
-	__tsa_swap(net, sock);
-	mutex_unlock(&tsa_mutex);
+	sk = sock->sk;
+	lock_sock(sk);
+	mine = sock_net(sk);
+	sock_net_set(sk, other);
+	put_net(mine);
+	release_sock(sk);
 
-out_put_net:
-	put_net(net);
 out:
 	sockfd_put(sock);
 	return err;
