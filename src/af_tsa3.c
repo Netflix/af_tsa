@@ -21,13 +21,128 @@ MODULE_ALIAS_NET_PF_PROTO_NAME(PF_NETLINK, NETLINK_GENERIC, TSA_GENL_NAME);
 
 static struct genl_family genl_family;
 
+const static enum sock_flags copied_bits[] = {
+	SO_DEBUG,
+	SO_REUSEADDR,
+	SO_REUSEPORT,
+	SO_DONTROUTE,
+	SO_BROADCAST,
+	SOCK_URGINLINE,
+	SOCK_RXQ_OVFL,
+	SOCK_KEEPOPEN,
+	SOCK_LINGER,
+	SOCK_PASSCRED,
+	SOCK_TSTAMP_NEW,
+	SOCK_RCVTSTAMPNS,
+	SOCK_RCVTSTAMP,
+	SOCK_NOFCS,
+	SOCK_WIFI_STATUS,
+	SOCK_SELECT_ERR_QUEUE,
+	SOCK_ZEROCOPY,
+	/*
+	 * Even those these have a more complicated implementation in sock.c, we can be lazy
+	 * because effectively what it does is call net_enable_timestamp after timestamps
+	 * are turned on.
+	 */
+	SOCK_TIMESTAMP,
+	SOCK_TIMESTAMPING_RX_SOFTWARE,
+	SOCK_FASYNC,
+};
+
+static void copy_sockopts(struct sock *oldsk, struct sock *newsk)
+{
+	enum sock_flags flag;
+	int rcvlowat;
+	bool val;
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(copied_bits); i++) {
+		flag = copied_bits[i];
+		val = sock_flag(oldsk, flag);
+		if (val && flag == SOCK_KEEPOPEN && newsk->sk_prot->keepalive)
+			newsk->sk_prot->keepalive(newsk, val);
+		if (val && flag == SOCK_LINGER)
+			newsk->sk_lingertime = oldsk->sk_lingertime;
+		if (val && flag == SOCK_TXTIME) {
+			newsk->sk_clockid = oldsk->sk_clockid;
+			newsk->sk_txtime_deadline_mode = oldsk->sk_txtime_deadline_mode;
+			newsk->sk_txtime_report_errors = oldsk->sk_txtime_report_errors;
+		}
+		/* We might be able to reduce the guarantees here and not require atomic ops */
+		sock_valbool_flag(newsk, flag, val);
+	}
+
+	WRITE_ONCE(newsk->sk_sndbuf, READ_ONCE(oldsk->sk_sndbuf));
+	WRITE_ONCE(newsk->sk_rcvbuf, READ_ONCE(oldsk->sk_rcvbuf));
+
+	newsk->sk_userlocks |= oldsk->sk_userlocks & (SOCK_RCVBUF_LOCK | SOCK_SNDBUF_LOCK);
+	newsk->sk_no_check_tx = oldsk->sk_no_check_tx;
+	newsk->sk_priority = oldsk->sk_priority;
+	newsk->sk_tsflags = oldsk->sk_tsflags;
+	newsk->sk_tskey = oldsk->sk_tskey;
+
+	rcvlowat = READ_ONCE(oldsk->sk_rcvlowat);
+	if (rcvlowat != 1) {
+		if (newsk->sk_socket->ops->set_rcvlowat)
+			newsk->sk_socket->ops->set_rcvlowat(newsk, rcvlowat);
+		else
+			WRITE_ONCE(newsk->sk_rcvlowat, rcvlowat ?: 1);
+	}
+
+	newsk->sk_rcvtimeo = oldsk->sk_rcvtimeo;
+	newsk->sk_sndtimeo = oldsk->sk_sndtimeo;
+	/*
+	 * Explicitly no support for BPF filters. Supporting them is too complicated right now.
+	 * This includes:
+	 * SO_ATTACH_FILTER
+	 * SO_ATTACH_BPF
+	 * SO_ATTACH_REUSEPORT_CBPF
+	 * SO_ATTACH_REUSEPORT_EBPF
+	 * SO_LOCK_FILTER
+	 */
+
+	if (oldsk->sk_socket->ops->set_peek_off && newsk->sk_socket->ops->set_peek_off)
+		newsk->sk_socket->ops->set_peek_off(newsk, READ_ONCE(oldsk->sk_peek_off));
+
+	WRITE_ONCE(newsk->sk_ll_usec, READ_ONCE(oldsk->sk_ll_usec));
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
+	WRITE_ONCE(newsk->sk_prefer_busy_poll, READ_ONCE(oldsk->sk_prefer_busy_poll));
+	WRITE_ONCE(newsk->sk_busy_poll_budget, READ_ONCE(oldsk->sk_busy_poll_budget));
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 12, 0)
+#error "Untested kernel version"
+#endif
+	newsk->sk_pacing_status = oldsk->sk_pacing_status;
+	newsk->sk_max_pacing_rate = oldsk->sk_max_pacing_rate;
+	newsk->sk_pacing_rate = oldsk->sk_pacing_rate;
+}
+
 static int tsa_swap(struct sk_buff *skb, struct genl_info *info)
 {
+	struct nlattr *adomain, *atype, *aprotocol;
+	int domain, type, protocol;
 	struct nlattr *afd, *anetnsfd;
 	struct net *other_ns, *my_ns;
 	struct socket *sock;
-	struct sock *sk;
+	struct socket *newsock;
 	int err = 0, fd;
+
+	adomain = info->attrs[TSA_C_CREATE_A_DOMAIN];
+	if (!adomain) {
+		NL_SET_ERR_MSG_MOD(info->extack, "Missing domain");
+		return -EINVAL;
+	}
+
+	atype = info->attrs[TSA_C_CREATE_A_TYPE];
+	if (!atype) {
+		NL_SET_ERR_MSG_MOD(info->extack, "Missing type");
+		return -EINVAL;
+	}
+
+	aprotocol = info->attrs[TSA_C_CREATE_A_PROTOCOL];
+
+	domain = nla_get_u32(adomain);
+	type = nla_get_u32(atype);
+	protocol = aprotocol ? nla_get_u32(aprotocol) : 0;
 
 	afd = info->attrs[TSA_C_SWAP_A_FD];
 	if (!afd) {
@@ -48,7 +163,7 @@ static int tsa_swap(struct sk_buff *skb, struct genl_info *info)
 		other_ns = get_net_ns_by_fd(nla_get_u32(anetnsfd));
 		if (IS_ERR(other_ns)) {
 			err = PTR_ERR(other_ns);
-			goto out;
+			return err;
 		}
 	} else {
 		other_ns = get_net(current->nsproxy->net_ns);
@@ -57,41 +172,34 @@ static int tsa_swap(struct sk_buff *skb, struct genl_info *info)
 	// Ensure socket is in an unconnected state and is
 	// not bound to a device to ensure switching network
 	// namespaces does not result in undesired behavior.
-	sk = sock->sk;
-	if (!sk) {
-		err = -EINVAL;
-		goto out;
+
+	err = __sock_create(other_ns, domain, type, 0, &newsock, 0);
+	if (err) {
+		NL_SET_ERR_MSG_MOD(info->extack, "could not create underlying socket");
+		goto out_put_net;
 	}
 
-	lock_sock(sk);
-	if (sk->sk_type != SOCK_STREAM && sk->sk_type != SOCK_DGRAM) {
-		NL_SET_ERR_MSG_MOD(info->extack, "Unsupported socket type");
-		goto out_put_release;
-	}
-	if (sk->sk_state != TCP_CLOSE || sk->sk_shutdown == SHUTDOWN_MASK) {
-		NL_SET_ERR_MSG_MOD(info->extack, "Socket is not in an unconnected state");
-		goto out_put_release;
-	}
+	newsock->file = sock->file;
+	sock->file->private_data = newsock;
 
-	if (sk->sk_bound_dev_if != 0) {
-		NL_SET_ERR_MSG_MOD(info->extack, "Socket is bound to a device");
-		goto out_put_release;
-	}
-	my_ns = sock_net(sk);
-	sock_net_set(sk, other_ns);
+	copy_sockopts(sock->sk, newsock->sk);
+
+	printk("swap succeeded %d", newsock->file->f_op->poll;);
+	my_ns = sock_net(sock->sk);
+	sock_release(sock);
 	put_net(my_ns);
-	release_sock(sk);
-	goto out;
 
-out_put_release:
-	release_sock(sk);
+	return err;
+
+out_put_net:
 	put_net(other_ns);
-out:
-	sockfd_put(sock);
 	return err;
 }
 
 static struct nla_policy tsa_swap_policy[TSA_C_SWAP_A_MAX + 1] = {
+	[TSA_C_SWAP_A_DOMAIN] = { .type = NLA_U32, },
+	[TSA_C_SWAP_A_TYPE] = { .type = NLA_U32, },
+	[TSA_C_SWAP_A_PROTOCOL] = { .type = NLA_U32, },
 	[TSA_C_SWAP_A_FD] = { .type = NLA_U32, },
 	[TCA_C_SWAP_A_NETNS_FD] = { .type = NLA_U32, },
 };
