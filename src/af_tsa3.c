@@ -116,6 +116,152 @@ static void copy_sockopts(struct sock *oldsk, struct sock *newsk)
 	newsk->sk_pacing_rate = oldsk->sk_pacing_rate;
 }
 
+struct epoll_filefd {
+	struct file *file;
+	int fd;
+} __packed;
+
+/* Wait structure used by the poll hooks */
+struct eppoll_entry {
+	/* List header used to link this structure to the "struct epitem" */
+	struct eppoll_entry *next;
+
+	/* The "base" pointer is set to the container "struct epitem" */
+	struct epitem *base;
+
+	/*
+	 * Wait queue item that will be linked to the target file wait
+	 * queue head.
+	 */
+	wait_queue_entry_t wait;
+
+	/* The wait queue head that linked the "wait" wait queue item */
+	wait_queue_head_t *whead;
+};
+
+/*
+ * Each file descriptor added to the eventpoll interface will
+ * have an entry of this type linked to the "rbr" RB tree.
+ * Avoid increasing the size of this struct, there can be many thousands
+ * of these on a server and we do not want this to take another cache line.
+ */
+struct epitem {
+	union {
+		/* RB tree node links this structure to the eventpoll RB tree */
+		struct rb_node rbn;
+		/* Used to free the struct epitem */
+		struct rcu_head rcu;
+	};
+
+	/* List header used to link this structure to the eventpoll ready list */
+	struct list_head rdllink;
+
+	/*
+	 * Works together "struct eventpoll"->ovflist in keeping the
+	 * single linked chain of items.
+	 */
+	struct epitem *next;
+
+	/* The file descriptor information this item refers to */
+	struct epoll_filefd ffd;
+
+	/* List containing poll wait queues */
+	struct eppoll_entry *pwqlist;
+
+	/* The "container" of this item */
+	struct eventpoll *ep;
+
+	/* List header used to link this item to the "struct file" items list */
+	struct hlist_node fllink;
+
+	/* wakeup_source used when EPOLLWAKEUP is set */
+	struct wakeup_source __rcu *ws;
+
+	/* The structure that describe the interested events and the source fd */
+	struct epoll_event event;
+};
+
+/*
+ * This structure is stored inside the "private_data" member of the file
+ * structure and represents the main data structure for the eventpoll
+ * interface.
+ */
+struct eventpoll {
+	/*
+	 * This mutex is used to ensure that files are not removed
+	 * while epoll is using them. This is held during the event
+	 * collection loop, the file cleanup path, the epoll file exit
+	 * code and the ctl operations.
+	 */
+	struct mutex mtx;
+
+	/* Wait queue used by sys_epoll_wait() */
+	wait_queue_head_t wq;
+
+	/* Wait queue used by file->poll() */
+	wait_queue_head_t poll_wait;
+
+	/* List of ready file descriptors */
+	struct list_head rdllist;
+
+	/* Lock which protects rdllist and ovflist */
+	rwlock_t lock;
+
+	/* RB tree root used to store monitored fd structs */
+	struct rb_root_cached rbr;
+
+	/*
+	 * This is a single linked list that chains all the "struct epitem" that
+	 * happened while transferring ready events to userspace w/out
+	 * holding ->lock.
+	 */
+	struct epitem *ovflist;
+
+	/* wakeup_source used when ep_scan_ready_list is running */
+	struct wakeup_source *ws;
+
+	/* The user that created the eventpoll descriptor */
+	struct user_struct *user;
+
+	struct file *file;
+
+	/* used to optimize loop detection check */
+	u64 gen;
+	struct hlist_head refs;
+
+#ifdef CONFIG_NET_RX_BUSY_POLL
+	/* used to track busy poll napi_id */
+	unsigned int napi_id;
+#endif
+
+#ifdef CONFIG_DEBUG_LOCK_ALLOC
+	/* tracks wakeup nests for lockdep validation */
+	u8 nests;
+#endif
+};
+
+void eventpoll_release_file(struct file *file, wait_queue_head_t *whead)
+{
+	struct eventpoll *ep;
+	struct epitem *epi;
+	struct hlist_node *next;
+	struct epoll_event event;
+
+	if (unlikely(!file->f_ep)) {
+		return;
+	}
+	hlist_for_each_entry_safe(epi, next, file->f_ep, fllink) {
+		ep = epi->ep;
+		event = epi->event;
+		epi->pwqlist->whead = whead;
+		if (event.events & EPOLLEXCLUSIVE)
+			add_wait_queue_exclusive(whead, &epi->pwqlist->wait);
+		else
+			add_wait_queue(whead, &epi->pwqlist->wait);
+	}
+}
+
+
 static int tsa_swap(struct sk_buff *skb, struct genl_info *info)
 {
 	struct nlattr *adomain, *atype, *aprotocol;
@@ -182,9 +328,9 @@ static int tsa_swap(struct sk_buff *skb, struct genl_info *info)
 	newsock->file = sock->file;
 	sock->file->private_data = newsock;
 
+	eventpoll_release_file(newsock->file, &newsock->sk->sk_wq->wait);
 	copy_sockopts(sock->sk, newsock->sk);
 
-	printk("swap succeeded %d", newsock->file->f_op->poll;);
 	my_ns = sock_net(sock->sk);
 	sock_release(sock);
 	put_net(my_ns);
