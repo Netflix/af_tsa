@@ -240,7 +240,7 @@ struct eventpoll {
 #endif
 };
 
-void eventpoll_release_file(struct file *file, wait_queue_head_t *whead)
+void eventpoll_add_wait_queue(struct file *file, wait_queue_head_t *whead)
 {
 	struct eventpoll *ep;
 	struct epitem *epi;
@@ -252,12 +252,14 @@ void eventpoll_release_file(struct file *file, wait_queue_head_t *whead)
 	}
 	hlist_for_each_entry_safe(epi, next, file->f_ep, fllink) {
 		ep = epi->ep;
+		mutex_lock(&ep->mtx);
 		event = epi->event;
 		epi->pwqlist->whead = whead;
 		if (event.events & EPOLLEXCLUSIVE)
 			add_wait_queue_exclusive(whead, &epi->pwqlist->wait);
 		else
 			add_wait_queue(whead, &epi->pwqlist->wait);
+		mutex_lock(&ep->mtx);
 	}
 }
 
@@ -328,7 +330,7 @@ static int tsa_swap(struct sk_buff *skb, struct genl_info *info)
 	newsock->file = sock->file;
 	sock->file->private_data = newsock;
 
-	eventpoll_release_file(newsock->file, &newsock->sk->sk_wq->wait);
+	eventpoll_add_wait_queue(newsock->file, &newsock->sk->sk_wq->wait);
 	copy_sockopts(sock->sk, newsock->sk);
 
 	sock_release(sock);
