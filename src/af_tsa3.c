@@ -331,9 +331,7 @@ static int tsa_swap(struct sk_buff *skb, struct genl_info *info)
 	eventpoll_release_file(newsock->file, &newsock->sk->sk_wq->wait);
 	copy_sockopts(sock->sk, newsock->sk);
 
-	my_ns = sock_net(sock->sk);
 	sock_release(sock);
-	put_net(my_ns);
 
 	return err;
 
