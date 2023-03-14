@@ -9,6 +9,7 @@
 #include <linux/sched.h>
 #include <linux/sched/task_stack.h>
 #include <asm/syscall.h>
+#include <linux/tcp.h>
 #include <linux/tracehook.h>
 #include <linux/version.h>
 
@@ -114,6 +115,32 @@ static void copy_sockopts(struct sock *oldsk, struct sock *newsk)
 	newsk->sk_pacing_status = oldsk->sk_pacing_status;
 	newsk->sk_max_pacing_rate = oldsk->sk_max_pacing_rate;
 	newsk->sk_pacing_rate = oldsk->sk_pacing_rate;
+}
+
+static void copy_tcpopts(struct sock *oldsk, struct sock *newsk)
+{
+	struct tcp_sock *oldtp = tcp_sk(oldsk);
+	struct tcp_sock *newtp = tcp_sk(newsk);
+	struct inet_connection_sock *oldicsk = inet_csk(oldsk);
+	struct inet_connection_sock *newicsk = inet_csk(newsk);
+
+	newtp->rx_opt.user_mss = oldtp->rx_opt.user_mss;
+	newtp->thin_lto = oldtp->thin_lto;
+	newtp->nonagle = oldtp->nonagle;
+	newtp->keepalive_time = oldtp->keepalive_time;
+	newtp->keepalive_intvl = oldtp->keepalive_intvl;
+	newtp->keepalive_probes = oldtp->keepalive_probes;
+	newicsk->icsk_syn_retries = oldicsk->icsk_syn_retries;
+	newtp->save_syn = oldtp->save_syn;
+	newtp->linger2 = oldtp->linger2;
+	newicsk->icsk_accept_queue.rskq_defer_accept = oldicsk->icsk_accept_queue.rskq_defer_accept;
+	newicsk->icsk_user_timeout = oldicsk->icsk_user_timeout;
+	newtp->fastopen_connect = oldtp->fastopen_connect;
+	newtp->fastopen_no_cookie = oldtp->fastopen_no_cookie;
+	newtp->tsoffset = oldtp->tsoffset;
+	newtp->notsent_lowat = oldtp->notsent_lowat;
+	newtp->recvmsg_inq = oldtp->recvmsg_inq;
+	newtp->tcp_tx_delay = oldtp->tcp_tx_delay;
 }
 
 struct epoll_filefd {
@@ -259,7 +286,7 @@ void eventpoll_add_wait_queue(struct file *file, wait_queue_head_t *whead)
 			add_wait_queue_exclusive(whead, &epi->pwqlist->wait);
 		else
 			add_wait_queue(whead, &epi->pwqlist->wait);
-		mutex_lock(&ep->mtx);
+		mutex_unlock(&ep->mtx);
 	}
 }
 
@@ -267,11 +294,12 @@ void eventpoll_add_wait_queue(struct file *file, wait_queue_head_t *whead)
 static int tsa_swap(struct sk_buff *skb, struct genl_info *info)
 {
 	struct nlattr *adomain, *atype, *aprotocol;
-	int domain, type, protocol;
 	struct nlattr *afd, *anetnsfd;
 	struct net *other_ns, *my_ns;
-	struct socket *sock;
+	int domain, type, protocol;
 	struct socket *newsock;
+	struct socket *sock;
+	struct sock *sk;
 	int err = 0, fd;
 
 	adomain = info->attrs[TSA_C_CREATE_A_DOMAIN];
@@ -307,21 +335,42 @@ static int tsa_swap(struct sk_buff *skb, struct genl_info *info)
 		return err;
 	}
 
-	if (anetnsfd) {
-		other_ns = get_net_ns_by_fd(nla_get_u32(anetnsfd));
-		if (IS_ERR(other_ns)) {
-			err = PTR_ERR(other_ns);
-			return err;
-		}
-	} else {
-		other_ns = get_net(current->nsproxy->net_ns);
+	sk = sock->sk;
+	lock_sock(sk);
+	if (sk->sk_family != AF_INET && sk->sk_family != AF_INET6) {
+		err = -EOPNOTSUPP;
+		goto out_err;
 	}
 
-	// Ensure socket is in an unconnected state and is
-	// not bound to a device to ensure switching network
-	// namespaces does not result in undesired behavior.
+	if (sk->sk_type != SOCK_STREAM && sk->sk_type != SOCK_DGRAM) {
+		err = -EOPNOTSUPP;
+		goto out_err;
+	}
 
-	err = __sock_create(other_ns, domain, type, 0, &newsock, 0);
+        /* check that the socket has never been connected or recently disconnected */
+        if (sk->sk_state != TCP_CLOSE || sk->sk_shutdown & SHUTDOWN_MASK) {
+                err = -EOPNOTSUPP;
+                goto out_err;
+        }
+
+        /* check that the socket is not bound to an interface*/
+        if (sk->sk_bound_dev_if != 0) {
+                err = -EOPNOTSUPP;
+                goto out_err;
+        }
+
+	other_ns = get_net_ns_by_fd(nla_get_u32(anetnsfd));
+	if (IS_ERR(other_ns)) {
+		err = PTR_ERR(other_ns);
+		goto out_err;
+	}
+
+	if (!ns_capable(other_ns->user_ns, CAP_NET_ADMIN)) {
+		err = -EPERM;
+		goto out_put_net;
+	}
+
+	err = __sock_create(other_ns, domain, type, protocol, &newsock, 0);
 	if (err) {
 		NL_SET_ERR_MSG_MOD(info->extack, "could not create underlying socket");
 		goto out_put_net;
@@ -332,13 +381,18 @@ static int tsa_swap(struct sk_buff *skb, struct genl_info *info)
 
 	eventpoll_add_wait_queue(newsock->file, &newsock->sk->sk_wq->wait);
 	copy_sockopts(sock->sk, newsock->sk);
+	copy_tcpopts(sock->sk, newsock->sk);
 
+	release_sock(sk);
 	sock_release(sock);
+	put_net(other_ns);
 
 	return err;
 
 out_put_net:
 	put_net(other_ns);
+out_err:
+	sockfd_put(sock);
 	return err;
 }
 
