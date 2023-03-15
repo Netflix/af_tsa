@@ -378,10 +378,13 @@ static int tsa_swap(struct sk_buff *skb, struct genl_info *info)
 
 	newsock->file = sock->file;
 	sock->file->private_data = newsock;
+	newsock->wq.fasync_list = sock->wq.fasync_list;
+	newsock->wq.flags = sock->wq.flags;
 
 	eventpoll_add_wait_queue(newsock->file, &newsock->sk->sk_wq->wait);
 	copy_sockopts(sock->sk, newsock->sk);
-	copy_tcpopts(sock->sk, newsock->sk);
+	if (sk->sk_type == SOCK_STREAM)
+		copy_tcpopts(sock->sk, newsock->sk);
 
 	release_sock(sk);
 	sock_release(sock);
