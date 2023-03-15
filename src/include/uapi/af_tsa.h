@@ -29,6 +29,9 @@ enum {
 /* Attributes for the swap command */
 enum {
 	TSA_C_SWAP_A_UNSPEC = 0,
+        TSA_C_SWAP_A_DOMAIN,
+        TSA_C_SWAP_A_TYPE,
+        TSA_C_SWAP_A_PROTOCOL,
 	TSA_C_SWAP_A_FD,
 	TCA_C_SWAP_A_NETNS_FD,
 	__TSA_C_SWAP_A_MAX,
